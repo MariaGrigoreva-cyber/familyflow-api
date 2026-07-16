@@ -53,4 +53,69 @@ router.post('/login', async (req, res) => {
   res.json({ token: sign(r.rows[0].id) });
 });
 
+
+// ── Смена пароля (для залогиненных) ────────────────────────────────────────
+const authMw = require('../middleware/auth');
+router.post('/change-password', authMw, async (req, res) => {
+  const { oldPassword, newPassword } = req.body || {};
+  if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'short_password' });
+  const r = await db.query('SELECT pass_hash FROM users WHERE id=$1', [req.user.uid]);
+  if (!r.rows.length) return res.status(404).json({ error: 'no_user' });
+  const ok = await bcrypt.compare(oldPassword || '', r.rows[0].pass_hash);
+  if (!ok) return res.status(401).json({ error: 'bad_credentials' });
+  const hash = await bcrypt.hash(newPassword, 10);
+  await db.query('UPDATE users SET pass_hash=$1 WHERE id=$2', [hash, req.user.uid]);
+  res.json({ ok: true });
+});
+
+// ── Восстановление пароля по email ─────────────────────────────────────────
+// Требует SMTP_URL в env (например smtp://user:pass@smtp.timeweb.ru:465).
+// Без него endpoint честно отвечает 503 — UI покажет «временно недоступно».
+let mailer = null;
+try {
+  if (process.env.SMTP_URL) {
+    const nodemailer = require('nodemailer');
+    mailer = nodemailer.createTransport(process.env.SMTP_URL);
+  }
+} catch { mailer = null; }
+
+router.post('/reset-request', async (req, res) => {
+  const { email } = req.body || {};
+  if (!emailOk(email)) return res.status(400).json({ error: 'bad_email' });
+  if (!mailer) return res.status(503).json({ error: 'mail_unavailable' });
+  const u = await db.query('SELECT id FROM users WHERE email=lower($1)', [email]);
+  // Не раскрываем, существует ли аккаунт — отвечаем одинаково
+  if (u.rows.length) {
+    const code = String(Math.floor(100000 + Math.random() * 900000)); // 6 цифр
+    const hash = await bcrypt.hash(code, 10);
+    await db.query(
+      `UPDATE users SET reset_hash=$1, reset_expires=now() + interval '15 minutes' WHERE id=$2`,
+      [hash, u.rows[0].id]);
+    try {
+      await mailer.sendMail({
+        from: process.env.MAIL_FROM || 'FamilyFlow <no-reply@familyflow.app>',
+        to: email,
+        subject: 'Код восстановления пароля FamilyFlow',
+        text: `Ваш код: ${code}\nДействует 15 минут. Если вы не запрашивали сброс — просто игнорируйте письмо.`,
+      });
+    } catch (e) { console.error('mail:', e.message); }
+  }
+  res.json({ ok: true });
+});
+
+router.post('/reset-confirm', async (req, res) => {
+  const { email, code, newPassword } = req.body || {};
+  if (!emailOk(email) || !code) return res.status(400).json({ error: 'bad_request' });
+  if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'short_password' });
+  const u = await db.query(
+    `SELECT id, reset_hash FROM users
+      WHERE email=lower($1) AND reset_hash IS NOT NULL AND reset_expires > now()`, [email]);
+  if (!u.rows.length) return res.status(400).json({ error: 'code_invalid' });
+  const ok = await bcrypt.compare(String(code), u.rows[0].reset_hash);
+  if (!ok) return res.status(400).json({ error: 'code_invalid' });
+  const hash = await bcrypt.hash(newPassword, 10);
+  await db.query('UPDATE users SET pass_hash=$1, reset_hash=NULL, reset_expires=NULL WHERE id=$2', [hash, u.rows[0].id]);
+  res.json({ token: sign(u.rows[0].id) });
+});
+
 module.exports = router;

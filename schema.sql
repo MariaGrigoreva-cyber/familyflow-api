@@ -34,3 +34,6 @@ CREATE TABLE IF NOT EXISTS family_states (
   updated_at  timestamptz NOT NULL DEFAULT now(),
   updated_by  uuid REFERENCES users(id)
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_hash text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_expires timestamptz;
