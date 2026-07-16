@@ -71,10 +71,21 @@ router.post('/change-password', authMw, async (req, res) => {
 // ── Восстановление пароля по email ─────────────────────────────────────────
 // Требует SMTP_URL в env (например smtp://user:pass@smtp.timeweb.ru:465).
 // Без него endpoint честно отвечает 503 — UI покажет «временно недоступно».
+// Конфиг SMTP: либо раздельные переменные (надёжно — панели хостингов
+// декодируют %40 в URL и ломают логин с @), либо SMTP_URL как запасной вариант.
 let mailer = null;
 try {
-  if (process.env.SMTP_URL) {
-    const nodemailer = require('nodemailer');
+  const nodemailer = require('nodemailer');
+  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    mailer = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,                          // smtp.yandex.ru
+      port: parseInt(process.env.SMTP_PORT || '465', 10),
+      secure: (process.env.SMTP_PORT || '465') === '465',   // 465 = SSL, 587 = STARTTLS
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+    });
+  } else if (process.env.SMTP_URL) {
     mailer = nodemailer.createTransport(process.env.SMTP_URL);
   }
 } catch { mailer = null; }
@@ -91,14 +102,21 @@ router.post('/reset-request', async (req, res) => {
     await db.query(
       `UPDATE users SET reset_hash=$1, reset_expires=now() + interval '15 minutes' WHERE id=$2`,
       [hash, u.rows[0].id]);
-    try {
-      await mailer.sendMail({
-        from: process.env.MAIL_FROM || 'FamilyFlow <no-reply@familyflow.app>',
-        to: email,
-        subject: 'Код восстановления пароля FamilyFlow',
-        text: `Ваш код: ${code}\nДействует 15 минут. Если вы не запрашивали сброс — просто игнорируйте письмо.`,
-      });
-    } catch (e) { console.error('mail:', e.message); }
+    // Письмо шлём асинхронно: HTTP-ответ не ждёт SMTP, зависший SMTP не вешает API.
+    // 10-секундный таймаут, чтобы битые соединения не копились.
+    const send = mailer.sendMail({
+      from: process.env.MAIL_FROM || 'FamilyFlow <no-reply@familyflow.app>',
+      to: email,
+      subject: 'Код восстановления пароля FamilyFlow',
+      text: `Ваш код: ${code}\nДействует 15 минут. Если вы не запрашивали сброс — просто игнорируйте письмо.`,
+    });
+    Promise.race([
+      send,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('smtp timeout 10s — проверьте smtps:// и порт 465')), 10000)),
+    ]).then(
+      () => console.log('mail: sent to', email),
+      e => console.error('mail:', e.message)
+    );
   }
   res.json({ ok: true });
 });
