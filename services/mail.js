@@ -1,6 +1,7 @@
 const axios = require('axios');
 
 async function sendWelcomeEmail(email) {
+console.log('sendWelcomeEmail called for:', email);
   try {
     await axios.post(
       'https://go2.unisender.ru/ru/transactional/api/v1/email/send.json',
