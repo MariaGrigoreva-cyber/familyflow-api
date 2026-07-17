@@ -68,32 +68,73 @@ router.post('/change-password', authMw, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── Восстановление пароля по email ─────────────────────────────────────────
-// Требует SMTP_URL в env (например smtp://user:pass@smtp.timeweb.ru:465).
-// Без него endpoint честно отвечает 503 — UI покажет «временно недоступно».
-// Конфиг SMTP: либо раздельные переменные (надёжно — панели хостингов
-// декодируют %40 в URL и ломают логин с @), либо SMTP_URL как запасной вариант.
-let mailer = null;
+// ── Отправка почты ─────────────────────────────────────────────────────────
+// Приоритет: Unisender Go (HTTP API, порт 443 — не блокируется хостингами).
+// Запасной путь: SMTP через nodemailer (если исходящие SMTP-порты открыты).
+const UNI_KEY = process.env.UNISENDER_API_KEY || null;
+
+let smtpTransport = null;
 try {
   const nodemailer = require('nodemailer');
   if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-    mailer = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,                          // smtp.yandex.ru
+    smtpTransport = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
       port: parseInt(process.env.SMTP_PORT || '465', 10),
-      secure: (process.env.SMTP_PORT || '465') === '465',   // 465 = SSL, 587 = STARTTLS
+      secure: (process.env.SMTP_PORT || '465') === '465',
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
       connectionTimeout: 10000,
       greetingTimeout: 10000,
     });
   } else if (process.env.SMTP_URL) {
-    mailer = nodemailer.createTransport(process.env.SMTP_URL);
+    smtpTransport = nodemailer.createTransport(process.env.SMTP_URL);
   }
-} catch { mailer = null; }
+} catch { smtpTransport = null; }
+
+const mailConfigured = () => !!(UNI_KEY || smtpTransport);
+
+async function sendMailUni(to, subject, text) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const res = await fetch('https://go1.unisender.ru/ru/transactional/api/v1/email/send.json', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-KEY': UNI_KEY },
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        message: {
+          recipients: [{ email: to }],
+          subject,
+          body: { plaintext: text },
+          from_email: process.env.MAIL_FROM_EMAIL || 'no-reply@familyflow.app',
+          from_name: process.env.MAIL_FROM_NAME || 'FamilyFlow',
+        },
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.status === 'error') {
+      throw new Error('unisender: ' + (data.message || data.code || res.status));
+    }
+  } finally { clearTimeout(timer); }
+}
+
+async function sendMail(to, subject, text) {
+  if (UNI_KEY) return sendMailUni(to, subject, text);
+  if (smtpTransport) {
+    return Promise.race([
+      smtpTransport.sendMail({
+        from: process.env.MAIL_FROM || 'FamilyFlow <no-reply@familyflow.app>',
+        to, subject, text,
+      }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('smtp timeout 10s')), 10000)),
+    ]);
+  }
+  throw new Error('mail transport not configured');
+}
 
 router.post('/reset-request', async (req, res) => {
   const { email } = req.body || {};
   if (!emailOk(email)) return res.status(400).json({ error: 'bad_email' });
-  if (!mailer) return res.status(503).json({ error: 'mail_unavailable' });
+  if (!mailConfigured()) return res.status(503).json({ error: 'mail_unavailable' });
   const u = await db.query('SELECT id FROM users WHERE email=lower($1)', [email]);
   // Не раскрываем, существует ли аккаунт — отвечаем одинаково
   if (u.rows.length) {
@@ -104,16 +145,11 @@ router.post('/reset-request', async (req, res) => {
       [hash, u.rows[0].id]);
     // Письмо шлём асинхронно: HTTP-ответ не ждёт SMTP, зависший SMTP не вешает API.
     // 10-секундный таймаут, чтобы битые соединения не копились.
-    const send = mailer.sendMail({
-      from: process.env.MAIL_FROM || 'FamilyFlow <no-reply@familyflow.app>',
-      to: email,
-      subject: 'Код восстановления пароля FamilyFlow',
-      text: `Ваш код: ${code}\nДействует 15 минут. Если вы не запрашивали сброс — просто игнорируйте письмо.`,
-    });
-    Promise.race([
-      send,
-      new Promise((_, rej) => setTimeout(() => rej(new Error('smtp timeout 10s — проверьте smtps:// и порт 465')), 10000)),
-    ]).then(
+    sendMail(
+      email,
+      'Код восстановления пароля FamilyFlow',
+      `Ваш код: ${code}\nДействует 15 минут. Если вы не запрашивали сброс — просто игнорируйте письмо.`
+    ).then(
       () => console.log('mail: sent to', email),
       e => console.error('mail:', e.message)
     );
