@@ -3,6 +3,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { q } = require('./db');
+const { sendWelcomeEmail } = require('../services/mail');
 
 const router = express.Router();
 const SECRET = process.env.JWT_SECRET;
@@ -44,6 +45,9 @@ router.post('/register', async (req, res) => {
     const user = u.rows[0];
     const f = await q(`INSERT INTO families (name, owner_id) VALUES ($1, $2) RETURNING id`, [familyName, user.id]);
     await q(`INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, 'owner')`, [f.rows[0].id, user.id]);
+
+    sendWelcomeEmail(user.email).catch(() => {});
+
     return res.json({ token: sign(user), user: { id: user.id, email: user.email, name: user.name }, familyId: f.rows[0].id });
   } catch (e) {
     if (e.code === '23505') return res.status(409).json({ error: 'email_taken' });
