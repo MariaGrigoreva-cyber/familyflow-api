@@ -7,6 +7,69 @@ const db = require('../db');
 const sign = uid => jwt.sign({ uid }, process.env.JWT_SECRET, { expiresIn: '90d' });
 const emailOk = e => typeof e === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
+// ── Отправка почты ─────────────────────────────────────────────────────────
+// Приоритет: Unisender Go (HTTP API, порт 443 — не блокируется хостингами).
+// Запасной путь: SMTP через nodemailer (если исходящие SMTP-порты открыты).
+const UNI_KEY = process.env.UNISENDER_API_KEY || null;
+
+let smtpTransport = null;
+try {
+  const nodemailer = require('nodemailer');
+  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    smtpTransport = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: parseInt(process.env.SMTP_PORT || '465', 10),
+      secure: (process.env.SMTP_PORT || '465') === '465',
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+    });
+  } else if (process.env.SMTP_URL) {
+    smtpTransport = nodemailer.createTransport(process.env.SMTP_URL);
+  }
+} catch { smtpTransport = null; }
+
+const mailConfigured = () => !!(UNI_KEY || smtpTransport);
+
+async function sendMailUni(to, subject, text, html) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const res = await fetch('https://go2.unisender.ru/ru/transactional/api/v1/email/send.json', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-KEY': UNI_KEY },
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        message: {
+          recipients: [{ email: to }],
+          subject,
+          body: { plaintext: text, html: html || undefined },
+          from_email: process.env.MAIL_FROM_EMAIL || 'no-reply@familyflow.app',
+          from_name: process.env.MAIL_FROM_NAME || 'FamilyFlow',
+        },
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.status === 'error') {
+      throw new Error('unisender: ' + (data.message || data.code || res.status));
+    }
+  } finally { clearTimeout(timer); }
+}
+
+async function sendMail(to, subject, text, html) {
+  if (UNI_KEY) return sendMailUni(to, subject, text, html);
+  if (smtpTransport) {
+    return Promise.race([
+      smtpTransport.sendMail({
+        from: process.env.MAIL_FROM || 'FamilyFlow <no-reply@familyflow.app>',
+        to, subject, text, html,
+      }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('smtp timeout 10s')), 10000)),
+    ]);
+  }
+  throw new Error('mail transport not configured');
+}
+
 router.post('/register', async (req, res) => {
   const { email, password, familyName } = req.body || {};
   if (!emailOk(email)) return res.status(400).json({ error: 'bad_email' });
@@ -32,6 +95,27 @@ router.post('/register', async (req, res) => {
       [f.rows[0].id, '{}', u.rows[0].id]
     );
     await client.query('COMMIT');
+
+    if (mailConfigured()) {
+      sendMail(
+        email,
+        'Добро пожаловать в FamilyFlow!',
+        'Спасибо за регистрацию в FamilyFlow. Теперь вы можете вести семейный бюджет, планировать расходы и контролировать накопления.',
+        `<h2>Добро пожаловать!</h2>
+         <p>Спасибо за регистрацию в FamilyFlow.</p>
+         <p>Теперь вы можете:</p>
+         <ul>
+           <li>вести семейный бюджет;</li>
+           <li>планировать расходы;</li>
+           <li>контролировать накопления.</li>
+         </ul>
+         <p>Желаем успешного финансового планирования!</p>`
+      ).then(
+        () => console.log('welcome mail: sent to', email),
+        e => console.error('welcome mail:', e.message)
+      );
+    }
+
     res.json({ token: sign(u.rows[0].id), familyId: f.rows[0].id });
   } catch (e) {
     await client.query('ROLLBACK');
@@ -67,69 +151,6 @@ router.post('/change-password', authMw, async (req, res) => {
   await db.query('UPDATE users SET pass_hash=$1 WHERE id=$2', [hash, req.user.uid]);
   res.json({ ok: true });
 });
-
-// ── Отправка почты ─────────────────────────────────────────────────────────
-// Приоритет: Unisender Go (HTTP API, порт 443 — не блокируется хостингами).
-// Запасной путь: SMTP через nodemailer (если исходящие SMTP-порты открыты).
-const UNI_KEY = process.env.UNISENDER_API_KEY || null;
-
-let smtpTransport = null;
-try {
-  const nodemailer = require('nodemailer');
-  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-    smtpTransport = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: parseInt(process.env.SMTP_PORT || '465', 10),
-      secure: (process.env.SMTP_PORT || '465') === '465',
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-    });
-  } else if (process.env.SMTP_URL) {
-    smtpTransport = nodemailer.createTransport(process.env.SMTP_URL);
-  }
-} catch { smtpTransport = null; }
-
-const mailConfigured = () => !!(UNI_KEY || smtpTransport);
-
-async function sendMailUni(to, subject, text) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 10000);
-  try {
-    const res = await fetch('https://go1.unisender.ru/ru/transactional/api/v1/email/send.json', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-KEY': UNI_KEY },
-      signal: ctrl.signal,
-      body: JSON.stringify({
-        message: {
-          recipients: [{ email: to }],
-          subject,
-          body: { plaintext: text },
-          from_email: process.env.MAIL_FROM_EMAIL || 'no-reply@familyflow.app',
-          from_name: process.env.MAIL_FROM_NAME || 'FamilyFlow',
-        },
-      }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.status === 'error') {
-      throw new Error('unisender: ' + (data.message || data.code || res.status));
-    }
-  } finally { clearTimeout(timer); }
-}
-
-async function sendMail(to, subject, text) {
-  if (UNI_KEY) return sendMailUni(to, subject, text);
-  if (smtpTransport) {
-    return Promise.race([
-      smtpTransport.sendMail({
-        from: process.env.MAIL_FROM || 'FamilyFlow <no-reply@familyflow.app>',
-        to, subject, text,
-      }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('smtp timeout 10s')), 10000)),
-    ]);
-  }
-  throw new Error('mail transport not configured');
-}
 
 router.post('/reset-request', async (req, res) => {
   const { email } = req.body || {};
