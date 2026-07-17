@@ -3,7 +3,7 @@ const axios = require('axios');
 async function sendWelcomeEmail(email) {
   try {
     await axios.post(
-      'https://go1.unisender.ru/ru/transactional/api/v1/email/send.json',
+      'https://go2.unisender.ru/ru/transactional/api/v1/email/send.json',
       {
         message: {
           recipients: [
