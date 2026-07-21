@@ -2,10 +2,21 @@
 const router = require('express').Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 const db = require('../db');
 
 const sign = uid => jwt.sign({ uid }, process.env.JWT_SECRET, { expiresIn: '90d' });
 const emailOk = e => typeof e === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+
+// Строже общего лимита на /auth — это конкретно подбор пароля и подбор
+// 6-значного кода сброса, самые ценные цели для брутфорса.
+const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'too_many_requests' },
+});
 
 // ── Отправка почты ─────────────────────────────────────────────────────────
 // Приоритет: Unisender Go (HTTP API, порт 443 — не блокируется хостингами).
@@ -127,7 +138,7 @@ router.post('/register', async (req, res) => {
   }
 });
 
-router.post('/login', async (req, res) => {
+router.post('/login', strictLimiter, async (req, res) => {
   const { email, password } = req.body || {};
   if (!emailOk(email) || !password) return res.status(400).json({ error: 'bad_credentials' });
   const r = await db.query('SELECT id, pass_hash FROM users WHERE email = lower($1)', [email]);
@@ -178,7 +189,7 @@ router.post('/reset-request', async (req, res) => {
   res.json({ ok: true });
 });
 
-router.post('/reset-confirm', async (req, res) => {
+router.post('/reset-confirm', strictLimiter, async (req, res) => {
   const { email, code, newPassword } = req.body || {};
   if (!emailOk(email) || !code) return res.status(400).json({ error: 'bad_request' });
   if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'short_password' });

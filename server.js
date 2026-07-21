@@ -2,16 +2,29 @@
 // Аккаунты + облачный снапшот бюджета + приглашения в семью.
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const db = require('./db');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
 app.set('trust proxy', 1);
+app.use(helmet());
 app.use(express.json({ limit: '3mb' }));
 
 const origins = (process.env.CORS_ORIGIN || '*').split(',').map(s => s.trim());
 app.use(cors({ origin: origins.includes('*') ? true : origins }));
+
+// Общий анти-брутфорс на весь /auth — конкретные точки риска (вход, код сброса
+// пароля) дополнительно ограничены строже прямо в routes/auth.js.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'too_many_requests' },
+});
 
 // Автоприменение схемы при старте — удобно для App Platform без ручного psql.
 (async () => {
@@ -26,7 +39,7 @@ app.get('/health', async (_req, res) => {
   catch { res.status(500).json({ ok: false }); }
 });
 
-app.use('/auth', require('./routes/auth'));
+app.use('/auth', authLimiter, require('./routes/auth'));
 app.use('/state', require('./routes/state'));
 app.use('/family', require('./routes/family'));
 
