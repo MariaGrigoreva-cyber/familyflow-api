@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const db = require('../db');
+const ah = require('../middleware/asyncHandler');
 
 const sign = uid => jwt.sign({ uid }, process.env.JWT_SECRET, { expiresIn: '90d' });
 const emailOk = e => typeof e === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
@@ -81,7 +82,7 @@ async function sendMail(to, subject, text, html) {
   throw new Error('mail transport not configured');
 }
 
-router.post('/register', async (req, res) => {
+router.post('/register', ah(async (req, res) => {
   const { email, password, familyName } = req.body || {};
   if (!emailOk(email)) return res.status(400).json({ error: 'bad_email' });
   if (!password || password.length < 6) return res.status(400).json({ error: 'short_password' });
@@ -129,16 +130,18 @@ router.post('/register', async (req, res) => {
 
     res.json({ token: sign(u.rows[0].id), familyId: f.rows[0].id });
   } catch (e) {
-    await client.query('ROLLBACK');
+    // ROLLBACK сам может упасть, если соединение уже разорвано исходной ошибкой —
+    // тогда это была бы вторая необработанная ошибка внутри catch.
+    try { await client.query('ROLLBACK'); } catch {}
     if (e.code === '23505') return res.status(409).json({ error: 'email_taken' });
     console.error(e);
     res.status(500).json({ error: 'server' });
   } finally {
     client.release();
   }
-});
+}));
 
-router.post('/login', strictLimiter, async (req, res) => {
+router.post('/login', strictLimiter, ah(async (req, res) => {
   const { email, password } = req.body || {};
   if (!emailOk(email) || !password) return res.status(400).json({ error: 'bad_credentials' });
   const r = await db.query('SELECT id, pass_hash FROM users WHERE email = lower($1)', [email]);
@@ -146,12 +149,12 @@ router.post('/login', strictLimiter, async (req, res) => {
   const ok = await bcrypt.compare(password, r.rows[0].pass_hash);
   if (!ok) return res.status(401).json({ error: 'bad_credentials' });
   res.json({ token: sign(r.rows[0].id) });
-});
+}));
 
 
 // ── Смена пароля (для залогиненных) ────────────────────────────────────────
 const authMw = require('../middleware/auth');
-router.post('/change-password', authMw, async (req, res) => {
+router.post('/change-password', authMw, ah(async (req, res) => {
   const { oldPassword, newPassword } = req.body || {};
   if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'short_password' });
   const r = await db.query('SELECT pass_hash FROM users WHERE id=$1', [req.user.uid]);
@@ -161,9 +164,9 @@ router.post('/change-password', authMw, async (req, res) => {
   const hash = await bcrypt.hash(newPassword, 10);
   await db.query('UPDATE users SET pass_hash=$1 WHERE id=$2', [hash, req.user.uid]);
   res.json({ ok: true });
-});
+}));
 
-router.post('/reset-request', async (req, res) => {
+router.post('/reset-request', ah(async (req, res) => {
   const { email } = req.body || {};
   if (!emailOk(email)) return res.status(400).json({ error: 'bad_email' });
   if (!mailConfigured()) return res.status(503).json({ error: 'mail_unavailable' });
@@ -187,9 +190,9 @@ router.post('/reset-request', async (req, res) => {
     );
   }
   res.json({ ok: true });
-});
+}));
 
-router.post('/reset-confirm', strictLimiter, async (req, res) => {
+router.post('/reset-confirm', strictLimiter, ah(async (req, res) => {
   const { email, code, newPassword } = req.body || {};
   if (!emailOk(email) || !code) return res.status(400).json({ error: 'bad_request' });
   if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'short_password' });
@@ -202,6 +205,6 @@ router.post('/reset-confirm', strictLimiter, async (req, res) => {
   const hash = await bcrypt.hash(newPassword, 10);
   await db.query('UPDATE users SET pass_hash=$1, reset_hash=NULL, reset_expires=NULL WHERE id=$2', [hash, u.rows[0].id]);
   res.json({ token: sign(u.rows[0].id) });
-});
+}));
 
 module.exports = router;

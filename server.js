@@ -1,5 +1,11 @@
 // FamilyFlow API · Фаза 0
 // Аккаунты + облачный снапшот бюджета + приглашения в семью.
+const Sentry = require('@sentry/node');
+// Пока SENTRY_DSN не задан в переменных окружения — SDK молча ничего не делает,
+// деплой безопасен и без него. DSN указываем на свой GlitchTip (152-ФЗ: данные
+// об ошибках не должны уходить за пределы РФ), не на облачный Sentry.io.
+Sentry.init({ dsn: process.env.SENTRY_DSN || '', enabled: !!process.env.SENTRY_DSN });
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -42,6 +48,14 @@ app.get('/health', async (_req, res) => {
 app.use('/auth', authLimiter, require('./routes/auth'));
 app.use('/state', require('./routes/state'));
 app.use('/family', require('./routes/family'));
+
+// Ловит необработанные ошибки из роутов и шлёт в GlitchTip (если DSN настроен),
+// затем отвечает клиенту JSON-ом, а не HTML-страницей Express по умолчанию.
+Sentry.setupExpressErrorHandler(app);
+app.use((err, _req, res, _next) => {
+  console.error(err);
+  res.status(500).json({ error: 'server' });
+});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log('FamilyFlow API on :' + PORT));
