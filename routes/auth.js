@@ -59,7 +59,7 @@ async function sendMailUni(to, subject, text, html) {
           subject,
           body: { plaintext: text, html: html || undefined },
           from_email: process.env.MAIL_FROM_EMAIL || 'no-reply@familyflow.app',
-          from_name: process.env.MAIL_FROM_NAME || 'FamilyFlow',
+          from_name: process.env.MAIL_FROM_NAME || 'Семейный поток',
         },
       }),
     });
@@ -75,7 +75,7 @@ async function sendMail(to, subject, text, html) {
   if (smtpTransport) {
     return Promise.race([
       smtpTransport.sendMail({
-        from: process.env.MAIL_FROM || 'FamilyFlow <no-reply@familyflow.app>',
+        from: process.env.MAIL_FROM || 'Семейный поток <no-reply@familyflow.app>',
         to, subject, text, html,
       }),
       new Promise((_, rej) => setTimeout(() => rej(new Error('smtp timeout 10s')), 10000)),
@@ -121,10 +121,10 @@ router.post('/register', ah(async (req, res) => {
       const verifyLink = `${req.protocol}://${req.get('host')}/auth/verify-email?token=${verifyToken}`;
       sendMail(
         email,
-        'Добро пожаловать в FamilyFlow!',
-        `Спасибо за регистрацию в FamilyFlow. Теперь вы можете вести семейный бюджет, планировать расходы и контролировать накопления.\n\nПодтвердите email: ${verifyLink}`,
+        'Добро пожаловать в Семейный поток!',
+        `Спасибо за регистрацию в приложении «Семейный поток». Теперь вы можете вести семейный бюджет, планировать расходы и контролировать накопления.\n\nПодтвердите email: ${verifyLink}`,
         `<h2>Добро пожаловать!</h2>
-         <p>Спасибо за регистрацию в FamilyFlow.</p>
+         <p>Спасибо за регистрацию в приложении «Семейный поток».</p>
          <p>Теперь вы можете:</p>
          <ul>
            <li>вести семейный бюджет;</li>
@@ -192,7 +192,7 @@ router.post('/reset-request', ah(async (req, res) => {
     // 10-секундный таймаут, чтобы битые соединения не копились.
     sendMail(
       email,
-      'Код восстановления пароля FamilyFlow',
+      'Код восстановления пароля «Семейный поток»',
       `Ваш код: ${code}\nДействует 15 минут. Если вы не запрашивали сброс — просто игнорируйте письмо.`
     ).then(
       () => console.log('mail: sent to', email),
@@ -254,7 +254,7 @@ router.post('/resend-verification', authMw, ah(async (req, res) => {
   const verifyLink = `${req.protocol}://${req.get('host')}/auth/verify-email?token=${token}`;
   sendMail(
     u.rows[0].email,
-    'Подтвердите email в FamilyFlow',
+    'Подтвердите email в «Семейный поток»',
     `Подтвердите email: ${verifyLink}`,
     `<p><a href="${verifyLink}">Подтвердите свой email</a>, чтобы не потерять доступ при восстановлении пароля.</p>`
   ).then(
