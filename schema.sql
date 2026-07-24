@@ -37,3 +37,14 @@ CREATE TABLE IF NOT EXISTS family_states (
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_hash text;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_expires timestamptz;
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at timestamptz;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_token text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_expires timestamptz;
+
+-- Пользователей, заведённых до введения проверки email, считаем подтверждёнными
+-- задним числом — им не нужно ничего подтверждать. Условие по created_at делает
+-- строку безопасной для повторного запуска: новых регистраций после этой даты
+-- она никогда не касается.
+UPDATE users SET email_verified_at = created_at
+  WHERE email_verified_at IS NULL AND created_at < '2026-07-22 00:00:00+00';

@@ -2,9 +2,11 @@
 const router = require('express').Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const db = require('../db');
 const ah = require('../middleware/asyncHandler');
+const authMw = require('../middleware/auth');
 
 const sign = uid => jwt.sign({ uid }, process.env.JWT_SECRET, { expiresIn: '90d' });
 const emailOk = e => typeof e === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
@@ -106,13 +108,21 @@ router.post('/register', ah(async (req, res) => {
       'INSERT INTO family_states(family_id, data, updated_by) VALUES($1, $2, $3)',
       [f.rows[0].id, '{}', u.rows[0].id]
     );
+    // Токен подтверждения email — обычная случайная строка, не хеш: как invite_code,
+    // не нуждается в bcrypt (не пароль, разово используемая ссылка с ограничением по сроку).
+    const verifyToken = crypto.randomBytes(32).toString('hex');
+    await client.query(
+      `UPDATE users SET verify_token=$1, verify_expires=now() + interval '24 hours' WHERE id=$2`,
+      [verifyToken, u.rows[0].id]
+    );
     await client.query('COMMIT');
 
     if (mailConfigured()) {
+      const verifyLink = `${req.protocol}://${req.get('host')}/auth/verify-email?token=${verifyToken}`;
       sendMail(
         email,
         'Добро пожаловать в FamilyFlow!',
-        'Спасибо за регистрацию в FamilyFlow. Теперь вы можете вести семейный бюджет, планировать расходы и контролировать накопления.',
+        `Спасибо за регистрацию в FamilyFlow. Теперь вы можете вести семейный бюджет, планировать расходы и контролировать накопления.\n\nПодтвердите email: ${verifyLink}`,
         `<h2>Добро пожаловать!</h2>
          <p>Спасибо за регистрацию в FamilyFlow.</p>
          <p>Теперь вы можете:</p>
@@ -121,6 +131,7 @@ router.post('/register', ah(async (req, res) => {
            <li>планировать расходы;</li>
            <li>контролировать накопления.</li>
          </ul>
+         <p><a href="${verifyLink}">Подтвердите свой email</a>, чтобы не потерять доступ при восстановлении пароля.</p>
          <p>Желаем успешного финансового планирования!</p>`
       ).then(
         () => console.log('welcome mail: sent to', email),
@@ -128,7 +139,7 @@ router.post('/register', ah(async (req, res) => {
       );
     }
 
-    res.json({ token: sign(u.rows[0].id), familyId: f.rows[0].id });
+    res.json({ token: sign(u.rows[0].id), familyId: f.rows[0].id, emailVerified: false });
   } catch (e) {
     // ROLLBACK сам может упасть, если соединение уже разорвано исходной ошибкой —
     // тогда это была бы вторая необработанная ошибка внутри catch.
@@ -153,7 +164,6 @@ router.post('/login', strictLimiter, ah(async (req, res) => {
 
 
 // ── Смена пароля (для залогиненных) ────────────────────────────────────────
-const authMw = require('../middleware/auth');
 router.post('/change-password', authMw, ah(async (req, res) => {
   const { oldPassword, newPassword } = req.body || {};
   if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'short_password' });
@@ -205,6 +215,53 @@ router.post('/reset-confirm', strictLimiter, ah(async (req, res) => {
   const hash = await bcrypt.hash(newPassword, 10);
   await db.query('UPDATE users SET pass_hash=$1, reset_hash=NULL, reset_expires=NULL WHERE id=$2', [hash, u.rows[0].id]);
   res.json({ token: sign(u.rows[0].id) });
+}));
+
+// ── Подтверждение email ─────────────────────────────────────────────────────
+router.get('/me', authMw, ah(async (req, res) => {
+  const r = await db.query('SELECT email, email_verified_at FROM users WHERE id=$1', [req.user.uid]);
+  if (!r.rows.length) return res.status(404).json({ error: 'no_user' });
+  res.json({ email: r.rows[0].email, emailVerified: !!r.rows[0].email_verified_at });
+}));
+
+// Переход по ссылке из письма — обычная браузерная навигация, не JSON-запрос.
+router.get('/verify-email', ah(async (req, res) => {
+  const token = String(req.query.token || '');
+  const frontendUrl = (process.env.CORS_ORIGIN || '').split(',')[0].trim();
+  const redirectOk = frontendUrl && frontendUrl !== '*';
+  if (!token) return res.status(400).send('Ссылка недействительна.');
+  const u = await db.query(
+    `UPDATE users SET email_verified_at=now(), verify_token=NULL, verify_expires=NULL
+      WHERE verify_token=$1 AND verify_expires > now() AND email_verified_at IS NULL
+      RETURNING id`, [token]);
+  if (!u.rows.length) {
+    return res.status(400).send('Ссылка для подтверждения email недействительна или уже устарела.');
+  }
+  if (redirectOk) return res.redirect(302, frontendUrl);
+  res.send('Email подтверждён! Можно закрыть эту страницу и вернуться в приложение.');
+}));
+
+router.post('/resend-verification', authMw, ah(async (req, res) => {
+  const u = await db.query('SELECT email, email_verified_at FROM users WHERE id=$1', [req.user.uid]);
+  if (!u.rows.length) return res.status(404).json({ error: 'no_user' });
+  if (u.rows[0].email_verified_at) return res.json({ ok: true, already: true });
+  if (!mailConfigured()) return res.status(503).json({ error: 'mail_unavailable' });
+  const token = crypto.randomBytes(32).toString('hex');
+  await db.query(
+    `UPDATE users SET verify_token=$1, verify_expires=now() + interval '24 hours' WHERE id=$2`,
+    [token, req.user.uid]
+  );
+  const verifyLink = `${req.protocol}://${req.get('host')}/auth/verify-email?token=${token}`;
+  sendMail(
+    u.rows[0].email,
+    'Подтвердите email в FamilyFlow',
+    `Подтвердите email: ${verifyLink}`,
+    `<p><a href="${verifyLink}">Подтвердите свой email</a>, чтобы не потерять доступ при восстановлении пароля.</p>`
+  ).then(
+    () => console.log('verify mail: sent to', u.rows[0].email),
+    e => console.error('verify mail:', e.message)
+  );
+  res.json({ ok: true });
 }));
 
 module.exports = router;
