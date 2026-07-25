@@ -48,6 +48,9 @@ app.get('/health', async (_req, res) => {
 app.use('/auth', authLimiter, require('./routes/auth'));
 app.use('/state', require('./routes/state'));
 app.use('/family', require('./routes/family'));
+app.use('/billing', require('./routes/billing'));
+
+require('./lib/scheduler').start();
 
 // Ловит необработанные ошибки из роутов и шлёт в GlitchTip (если DSN настроен),
 // затем отвечает клиенту JSON-ом, а не HTML-страницей Express по умолчанию.

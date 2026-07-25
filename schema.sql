@@ -48,3 +48,29 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS verify_expires timestamptz;
 -- она никогда не касается.
 UPDATE users SET email_verified_at = created_at
   WHERE email_verified_at IS NULL AND created_at < '2026-07-22 00:00:00+00';
+
+-- ── Тарифы и оплата ──────────────────────────────────────────────────────────
+ALTER TABLE families ADD COLUMN IF NOT EXISTS plan text NOT NULL DEFAULT 'trial'; -- trial | free | pro
+ALTER TABLE families ADD COLUMN IF NOT EXISTS trial_ends_at timestamptz;
+ALTER TABLE families ADD COLUMN IF NOT EXISTS pro_until timestamptz;
+ALTER TABLE families ADD COLUMN IF NOT EXISTS billing_period text; -- monthly | yearly
+ALTER TABLE families ADD COLUMN IF NOT EXISTS auto_renew boolean NOT NULL DEFAULT true;
+ALTER TABLE families ADD COLUMN IF NOT EXISTS yk_payment_method_id text; -- сохранённый способ оплаты в ЮKassa для автосписания
+ALTER TABLE families ADD COLUMN IF NOT EXISTS cancel_token text; -- разовая ссылка «отключить автопродление» из письма-напоминания
+ALTER TABLE families ADD COLUMN IF NOT EXISTS renewal_reminder_sent_for timestamptz; -- за какой pro_until уже отправили напоминание — не дублировать
+
+-- Новым семьям — 30-дневный триал с полным доступом. Существующие семьи
+-- (заведённые до введения тарифов) получают Pro бессрочно задним числом —
+-- нечестно вводить платный барьер для тех, кто уже пользовался бесплатно.
+UPDATE families SET plan='pro', pro_until='2099-01-01 00:00:00+00', auto_renew=false
+  WHERE plan='trial' AND created_at < '2026-07-26 00:00:00+00';
+
+CREATE TABLE IF NOT EXISTS payments (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  family_id   uuid NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+  yk_payment_id text UNIQUE NOT NULL,
+  amount      numeric NOT NULL,
+  status      text NOT NULL, -- pending | succeeded | canceled
+  period      text NOT NULL, -- monthly | yearly
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
