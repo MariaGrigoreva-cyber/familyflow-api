@@ -74,3 +74,25 @@ CREATE TABLE IF NOT EXISTS payments (
   period      text NOT NULL, -- monthly | yearly
   created_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- ── Push-уведомления ─────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint    text UNIQUE NOT NULL,
+  p256dh      text NOT NULL,
+  auth        text NOT NULL,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_weekly_push_at date;
+
+-- Дедуп напоминаний о платеже: одно уведомление на семью/плановый платёж/дату/вид.
+CREATE TABLE IF NOT EXISTS push_payment_reminders_sent (
+  family_id   uuid NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+  planned_id  text NOT NULL,
+  due_date    date NOT NULL,
+  kind        text NOT NULL, -- today | tomorrow
+  sent_at     timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (family_id, planned_id, due_date, kind)
+);

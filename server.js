@@ -49,8 +49,10 @@ app.use('/auth', authLimiter, require('./routes/auth'));
 app.use('/state', require('./routes/state'));
 app.use('/family', require('./routes/family'));
 app.use('/billing', require('./routes/billing'));
+app.use('/push', require('./routes/push'));
 
 require('./lib/scheduler').start();
+require('./lib/pushScheduler').start();
 
 // Ловит необработанные ошибки из роутов и шлёт в GlitchTip (если DSN настроен),
 // затем отвечает клиенту JSON-ом, а не HTML-страницей Express по умолчанию.
