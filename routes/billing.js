@@ -80,6 +80,14 @@ router.post('/webhook', ah(async (req, res) => {
   res.status(200).json({ ok: true });
 }));
 
+// Отключить автопродление прямо из приложения (в дополнение к ссылке из письма).
+router.post('/cancel-auto-renew', authMw, ah(async (req, res) => {
+  const m = await db.query("SELECT family_id FROM family_members WHERE user_id=$1 AND role='owner'", [req.user.uid]);
+  if (!m.rows.length) return res.status(403).json({ error: 'owner_only' });
+  await db.query('UPDATE families SET auto_renew=false WHERE id=$1', [m.rows[0].family_id]);
+  res.json({ ok: true });
+}));
+
 // Ссылка «отключить автопродление» из письма-напоминания — без входа в аккаунт.
 router.get('/cancel', ah(async (req, res) => {
   const token = String(req.query.token || '');
