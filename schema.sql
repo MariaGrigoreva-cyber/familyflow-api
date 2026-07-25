@@ -96,3 +96,9 @@ CREATE TABLE IF NOT EXISTS push_payment_reminders_sent (
   sent_at     timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (family_id, planned_id, due_date, kind)
 );
+
+-- ── Шифрование данных семьи ──────────────────────────────────────────────────
+-- Само шифрование/расшифровку и перенос существующих строк делает lib/crypto.js +
+-- lib/migrateEncryption.js (нужен Node, чистым SQL AES не сделать) — здесь только
+-- добавляем колонку под шифротекст.
+ALTER TABLE family_states ADD COLUMN IF NOT EXISTS data_enc bytea;

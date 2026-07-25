@@ -37,6 +37,7 @@ const authLimiter = rateLimit({
   try {
     await db.query(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
     console.log('schema OK');
+    await require('./lib/migrateEncryption').run();
   } catch (e) { console.error('schema error:', e.message); }
 })();
 
