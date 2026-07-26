@@ -9,7 +9,9 @@ const ah = require('../middleware/asyncHandler');
 const authMw = require('../middleware/auth');
 const { sendMail, mailConfigured } = require('../lib/mail');
 
-const sign = uid => jwt.sign({ uid }, process.env.JWT_SECRET, { expiresIn: '90d' });
+// tv (token_version) — см. middleware/auth.js: смена/сброс пароля увеличивает
+// версию в БД и тем самым отзывает все ранее выданные токены.
+const sign = (uid, tv) => jwt.sign({ uid, tv }, process.env.JWT_SECRET, { expiresIn: '90d' });
 const emailOk = e => typeof e === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
 // Строже общего лимита на /auth — это конкретно подбор пароля и подбор
@@ -78,7 +80,7 @@ router.post('/register', ah(async (req, res) => {
       );
     }
 
-    res.json({ token: sign(u.rows[0].id), familyId: f.rows[0].id, emailVerified: false });
+    res.json({ token: sign(u.rows[0].id, 1), familyId: f.rows[0].id, emailVerified: false });
   } catch (e) {
     // ROLLBACK сам может упасть, если соединение уже разорвано исходной ошибкой —
     // тогда это была бы вторая необработанная ошибка внутри catch.
@@ -94,11 +96,11 @@ router.post('/register', ah(async (req, res) => {
 router.post('/login', strictLimiter, ah(async (req, res) => {
   const { email, password } = req.body || {};
   if (!emailOk(email) || !password) return res.status(400).json({ error: 'bad_credentials' });
-  const r = await db.query('SELECT id, pass_hash FROM users WHERE email = lower($1)', [email]);
+  const r = await db.query('SELECT id, pass_hash, token_version FROM users WHERE email = lower($1)', [email]);
   if (!r.rows.length) return res.status(401).json({ error: 'bad_credentials' });
   const ok = await bcrypt.compare(password, r.rows[0].pass_hash);
   if (!ok) return res.status(401).json({ error: 'bad_credentials' });
-  res.json({ token: sign(r.rows[0].id) });
+  res.json({ token: sign(r.rows[0].id, r.rows[0].token_version) });
 }));
 
 
@@ -111,8 +113,61 @@ router.post('/change-password', authMw, ah(async (req, res) => {
   const ok = await bcrypt.compare(oldPassword || '', r.rows[0].pass_hash);
   if (!ok) return res.status(401).json({ error: 'bad_credentials' });
   const hash = await bcrypt.hash(newPassword, 10);
-  await db.query('UPDATE users SET pass_hash=$1 WHERE id=$2', [hash, req.user.uid]);
-  res.json({ ok: true });
+  // Инвалидируем все ранее выданные токены (в т.ч. потенциально украденные) —
+  // и сразу выдаём новый, чтобы не разлогинить текущую сессию её же действием.
+  const v = await db.query(
+    'UPDATE users SET pass_hash=$1, token_version=token_version+1 WHERE id=$2 RETURNING token_version',
+    [hash, req.user.uid]
+  );
+  res.json({ ok: true, token: sign(req.user.uid, v.rows[0].token_version) });
+}));
+
+// ── Удаление аккаунта (152-ФЗ: право на отзыв согласия и уничтожение ПДн) ──
+router.post('/delete-account', authMw, strictLimiter, ah(async (req, res) => {
+  const { password } = req.body || {};
+  const u = await db.query('SELECT pass_hash FROM users WHERE id=$1', [req.user.uid]);
+  if (!u.rows.length) return res.status(404).json({ error: 'no_user' });
+  const ok = await bcrypt.compare(password || '', u.rows[0].pass_hash);
+  if (!ok) return res.status(401).json({ error: 'bad_credentials' });
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const m = await client.query(
+      'SELECT family_id, role FROM family_members WHERE user_id=$1 FOR UPDATE', [req.user.uid]
+    );
+    if (m.rows.length) {
+      const { family_id: fid, role } = m.rows[0];
+      const others = await client.query(
+        'SELECT user_id FROM family_members WHERE family_id=$1 AND user_id<>$2 ORDER BY joined_at ASC',
+        [fid, req.user.uid]
+      );
+      if (!others.rows.length) {
+        // Единственный участник семьи — удаляем семью целиком: бюджет и платежи
+        // уходят вместе с ней (payments ссылается на families с ON DELETE CASCADE).
+        await client.query('DELETE FROM family_states WHERE family_id=$1', [fid]);
+        await client.query('DELETE FROM families WHERE id=$1', [fid]);
+      } else if (role === 'owner') {
+        // Передаём владение самому давнему из оставшихся — семья и общий бюджет
+        // остаются доступны другим участникам.
+        await client.query(
+          "UPDATE family_members SET role='owner' WHERE family_id=$1 AND user_id=$2",
+          [fid, others.rows[0].user_id]
+        );
+      }
+    }
+    // Каскадно удаляет оставшуюся запись family_members (если семья не снесена целиком
+    // выше) и все push_subscriptions пользователя.
+    await client.query('DELETE FROM users WHERE id=$1', [req.user.uid]);
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    console.error(e);
+    res.status(500).json({ error: 'server' });
+  } finally {
+    client.release();
+  }
 }));
 
 router.post('/reset-request', ah(async (req, res) => {
@@ -152,8 +207,13 @@ router.post('/reset-confirm', strictLimiter, ah(async (req, res) => {
   const ok = await bcrypt.compare(String(code), u.rows[0].reset_hash);
   if (!ok) return res.status(400).json({ error: 'code_invalid' });
   const hash = await bcrypt.hash(newPassword, 10);
-  await db.query('UPDATE users SET pass_hash=$1, reset_hash=NULL, reset_expires=NULL WHERE id=$2', [hash, u.rows[0].id]);
-  res.json({ token: sign(u.rows[0].id) });
+  // token_version+1 — сброс пароля обычно означает «я мог потерять контроль над
+  // аккаунтом», поэтому заодно отзываем все ранее выданные токены.
+  const v = await db.query(
+    'UPDATE users SET pass_hash=$1, reset_hash=NULL, reset_expires=NULL, token_version=token_version+1 WHERE id=$2 RETURNING token_version',
+    [hash, u.rows[0].id]
+  );
+  res.json({ token: sign(u.rows[0].id, v.rows[0].token_version) });
 }));
 
 // ── Подтверждение email ─────────────────────────────────────────────────────
