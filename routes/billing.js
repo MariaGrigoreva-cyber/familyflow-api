@@ -126,10 +126,13 @@ router.post('/webhook', ah(async (req, res) => {
 }));
 
 // Отключить автопродление прямо из приложения (в дополнение к ссылке из письма).
+// Обязательно стираем и yk_payment_method_id — это требование ЮKassa для
+// подключения рекуррентных платежей: у покупателя должна быть возможность
+// самостоятельно отвязать способ оплаты от сервиса, без обращения в поддержку.
 router.post('/cancel-auto-renew', authMw, ah(async (req, res) => {
   const m = await db.query("SELECT family_id FROM family_members WHERE user_id=$1 AND role='owner'", [req.user.uid]);
   if (!m.rows.length) return res.status(403).json({ error: 'owner_only' });
-  await db.query('UPDATE families SET auto_renew=false WHERE id=$1', [m.rows[0].family_id]);
+  await db.query('UPDATE families SET auto_renew=false, yk_payment_method_id=NULL WHERE id=$1', [m.rows[0].family_id]);
   res.json({ ok: true });
 }));
 
@@ -138,7 +141,7 @@ router.get('/cancel', ah(async (req, res) => {
   const token = String(req.query.token || '');
   if (!token) return res.status(400).send('Ссылка недействительна.');
   const r = await db.query(
-    'UPDATE families SET auto_renew=false, cancel_token=NULL WHERE cancel_token=$1 RETURNING pro_until',
+    'UPDATE families SET auto_renew=false, yk_payment_method_id=NULL, cancel_token=NULL WHERE cancel_token=$1 RETURNING pro_until',
     [token]
   );
   if (!r.rows.length) return res.status(400).send('Ссылка недействительна или уже использована.');
