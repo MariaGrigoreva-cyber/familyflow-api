@@ -3,9 +3,16 @@ const router = require('express').Router();
 const db = require('../db');
 const auth = require('../middleware/auth');
 const ah = require('../middleware/asyncHandler');
+const { computePlan } = require('../lib/billingLogic');
 
 const CODE_ABC = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // без похожих символов
 const genCode = () => Array.from({ length: 6 }, () => CODE_ABC[Math.floor(Math.random() * CODE_ABC.length)]).join('');
+
+// Общий бюджет на нескольких участников — фича Pro (см. Settings.jsx на фронте).
+// На free-тарифе семья остаётся в составе одного владельца; уже добавленных
+// участников при истечении подписки не выгоняем — ограничиваем только новые
+// приглашения/присоединения.
+const FREE_MEMBER_LIMIT = 1;
 
 router.get('/me', auth, ah(async (req, res) => {
   const r = await db.query(
@@ -19,8 +26,9 @@ router.get('/me', auth, ah(async (req, res) => {
 
 router.post('/invite', auth, ah(async (req, res) => {
   const m = await db.query(
-    "SELECT family_id FROM family_members WHERE user_id=$1 AND role='owner'", [req.user.uid]);
+    "SELECT f.trial_ends_at, f.pro_until, m.family_id FROM family_members m JOIN families f ON f.id=m.family_id WHERE m.user_id=$1 AND m.role='owner'", [req.user.uid]);
   if (!m.rows.length) return res.status(403).json({ error: 'owner_only' });
+  if (computePlan(m.rows[0]) === 'free') return res.status(403).json({ error: 'pro_required' });
   const code = genCode();
   await db.query('UPDATE families SET invite_code=$1 WHERE id=$2', [code, m.rows[0].family_id]);
   res.json({ code });
@@ -36,15 +44,30 @@ router.post('/join', auth, ah(async (req, res) => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+
     // Покидаем прежнюю семью (упрощение фазы 0: один пользователь — одна семья).
     // Если пользователь был единственным участником — его старая семья удаляется целиком.
     const old = await client.query('SELECT family_id FROM family_members WHERE user_id=$1', [req.user.uid]);
     if (old.rows.length) {
       const oldFid = old.rows[0].family_id;
       if (oldFid === fid) { await client.query('ROLLBACK'); return res.json({ ok: true, familyId: fid, already: true }); }
+    }
+
+    // Лимит участников на free-тарифе целевой семьи — общий бюджет на нескольких
+    // участников это Pro-фича (см. FREE_MEMBER_LIMIT выше).
+    const target = await client.query('SELECT trial_ends_at, pro_until FROM families WHERE id=$1', [fid]);
+    if (computePlan(target.rows[0] || {}) === 'free') {
+      const cnt = await client.query('SELECT count(*)::int AS c FROM family_members WHERE family_id=$1', [fid]);
+      if (cnt.rows[0].c >= FREE_MEMBER_LIMIT) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'pro_required' });
+      }
+    }
+
+    if (old.rows.length) {
       await client.query('DELETE FROM family_members WHERE user_id=$1', [req.user.uid]);
-      const left = await client.query('SELECT 1 FROM family_members WHERE family_id=$1 LIMIT 1', [oldFid]);
-      if (!left.rows.length) await client.query('DELETE FROM families WHERE id=$1', [oldFid]);
+      const left = await client.query('SELECT 1 FROM family_members WHERE family_id=$1 LIMIT 1', [old.rows[0].family_id]);
+      if (!left.rows.length) await client.query('DELETE FROM families WHERE id=$1', [old.rows[0].family_id]);
     }
     await client.query(
       "INSERT INTO family_members(family_id, user_id, role) VALUES($1, $2, 'member')", [fid, req.user.uid]);

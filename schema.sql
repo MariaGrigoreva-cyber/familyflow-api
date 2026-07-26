@@ -70,10 +70,15 @@ CREATE TABLE IF NOT EXISTS payments (
   family_id   uuid NOT NULL REFERENCES families(id) ON DELETE CASCADE,
   yk_payment_id text UNIQUE NOT NULL,
   amount      numeric NOT NULL,
-  status      text NOT NULL, -- pending | succeeded | canceled
+  status      text NOT NULL, -- pending | succeeded | canceled | refunded
   period      text NOT NULL, -- monthly | yearly
   created_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- Возврат за цифровой продукт надлежащего качества (ст. 48 ЗоЗПП, действует с
+-- 01.02.2026) — потребитель вправе отказаться в течение 7 дней с даты оплаты.
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS refunded_at timestamptz;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS yk_refund_id text;
 
 -- ── Push-уведомления ─────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS push_subscriptions (
@@ -96,6 +101,14 @@ CREATE TABLE IF NOT EXISTS push_payment_reminders_sent (
   sent_at     timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (family_id, planned_id, due_date, kind)
 );
+
+-- ── Согласия ──────────────────────────────────────────────────────────────
+ALTER TABLE users ADD COLUMN IF NOT EXISTS pdn_consent_at timestamptz; -- согласие на обработку персональных данных (152-ФЗ), фиксируется при регистрации
+ALTER TABLE users ADD COLUMN IF NOT EXISTS pdn_consent_ip text;
+ALTER TABLE families ADD COLUMN IF NOT EXISTS auto_charge_consent_at timestamptz; -- согласие на автосписание (рекуррентные платежи), фиксируется перед первой оплатой
+ALTER TABLE families ADD COLUMN IF NOT EXISTS auto_charge_consent_ip text;
+-- Пользователей и семьи, заведённых до введения явного согласия, задним числом
+-- не помечаем — фактического согласия по новой форме от них не было.
 
 -- ── Шифрование данных семьи ──────────────────────────────────────────────────
 -- Само шифрование/расшифровку и перенос существующих строк делает lib/crypto.js +

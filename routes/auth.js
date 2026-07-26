@@ -23,16 +23,17 @@ const strictLimiter = rateLimit({
 });
 
 router.post('/register', ah(async (req, res) => {
-  const { email, password, familyName } = req.body || {};
+  const { email, password, familyName, pdnConsent } = req.body || {};
   if (!emailOk(email)) return res.status(400).json({ error: 'bad_email' });
   if (!password || password.length < 6) return res.status(400).json({ error: 'short_password' });
+  if (pdnConsent !== true) return res.status(400).json({ error: 'pdn_consent_required' });
   const client = await db.connect();
   try {
     await client.query('BEGIN');
     const hash = await bcrypt.hash(password, 10);
     const u = await client.query(
-      'INSERT INTO users(email, pass_hash) VALUES(lower($1), $2) RETURNING id',
-      [email, hash]
+      'INSERT INTO users(email, pass_hash, pdn_consent_at, pdn_consent_ip) VALUES(lower($1), $2, now(), $3) RETURNING id',
+      [email, hash, req.ip]
     );
     const f = await client.query(
       `INSERT INTO families(name, trial_ends_at) VALUES($1, now() + interval '30 days') RETURNING id`,
@@ -157,9 +158,13 @@ router.post('/reset-confirm', strictLimiter, ah(async (req, res) => {
 
 // ── Подтверждение email ─────────────────────────────────────────────────────
 router.get('/me', authMw, ah(async (req, res) => {
-  const r = await db.query('SELECT email, email_verified_at FROM users WHERE id=$1', [req.user.uid]);
+  const r = await db.query('SELECT email, email_verified_at, pdn_consent_at FROM users WHERE id=$1', [req.user.uid]);
   if (!r.rows.length) return res.status(404).json({ error: 'no_user' });
-  res.json({ email: r.rows[0].email, emailVerified: !!r.rows[0].email_verified_at });
+  res.json({
+    email: r.rows[0].email,
+    emailVerified: !!r.rows[0].email_verified_at,
+    pdnConsentAt: r.rows[0].pdn_consent_at,
+  });
 }));
 
 // Переход по ссылке из письма — обычная браузерная навигация, не JSON-запрос.
