@@ -44,6 +44,24 @@ router.post('/checkout', authMw, ah(async (req, res) => {
   const amount = PRICE[period];
   const frontendUrl = (process.env.CORS_ORIGIN || '').split(',')[0].trim() || 'https://app.myfamilyflow.ru';
 
+  // Защита от двойного клика «Оплатить»: если недавно уже создан платёж этой же
+  // семьи и того же периода, который всё ещё ждёт подтверждения — отдаём его
+  // ссылку вместо того чтобы плодить в ЮKassa дублирующие платежи.
+  const pending = await db.query(
+    `SELECT yk_payment_id FROM payments
+      WHERE family_id=$1 AND period=$2 AND status='pending' AND created_at > now() - interval '10 minutes'
+      ORDER BY created_at DESC LIMIT 1`,
+    [familyId, period]
+  );
+  if (pending.rows.length) {
+    try {
+      const existing = await yk.getPayment(pending.rows[0].yk_payment_id);
+      if (existing.status === 'pending' && existing.confirmation?.confirmation_url) {
+        return res.json({ confirmationUrl: existing.confirmation.confirmation_url });
+      }
+    } catch (e) { console.error('billing checkout recheck pending:', e.message); }
+  }
+
   // Фиксируем согласие сразу, независимо от исхода оплаты — карта сохраняется
   // ЮKassa (save_payment_method) уже в этом платеже, значит согласие на будущие
   // автосписания нужно до его создания.
