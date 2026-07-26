@@ -54,8 +54,11 @@ router.post('/join', auth, ah(async (req, res) => {
     }
 
     // Лимит участников на free-тарифе целевой семьи — общий бюджет на нескольких
-    // участников это Pro-фича (см. FREE_MEMBER_LIMIT выше).
-    const target = await client.query('SELECT trial_ends_at, pro_until FROM families WHERE id=$1', [fid]);
+    // участников это Pro-фича (см. FREE_MEMBER_LIMIT выше). FOR UPDATE блокирует
+    // строку семьи на время транзакции — без этого два одновременных /join на одну
+    // free-семью могли оба пройти проверку count до того, как любой из них закоммитится,
+    // и превысить лимит.
+    const target = await client.query('SELECT trial_ends_at, pro_until FROM families WHERE id=$1 FOR UPDATE', [fid]);
     if (computePlan(target.rows[0] || {}) === 'free') {
       const cnt = await client.query('SELECT count(*)::int AS c FROM family_members WHERE family_id=$1', [fid]);
       if (cnt.rows[0].c >= FREE_MEMBER_LIMIT) {
