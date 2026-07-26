@@ -117,6 +117,14 @@ ALTER TABLE families ADD COLUMN IF NOT EXISTS auto_charge_consent_ip text;
 -- проходить проверку в middleware/auth.js, даже до истечения их 90 дней.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version int NOT NULL DEFAULT 1;
 
+-- family_states.updated_by ссылался на users(id) без ON DELETE — при удалении
+-- владельца, чья семья остаётся жить для других участников (POST
+-- /auth/delete-account), это падало нарушением внешнего ключа: семья и её
+-- бюджет должны пережить удаление автора последнего сохранения.
+ALTER TABLE family_states DROP CONSTRAINT IF EXISTS family_states_updated_by_fkey;
+ALTER TABLE family_states ADD CONSTRAINT family_states_updated_by_fkey
+  FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL;
+
 -- ── Шифрование данных семьи ──────────────────────────────────────────────────
 -- Само шифрование/расшифровку и перенос существующих строк делает lib/crypto.js +
 -- lib/migrateEncryption.js (нужен Node, чистым SQL AES не сделать) — здесь только
