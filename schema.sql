@@ -130,3 +130,11 @@ ALTER TABLE family_states ADD CONSTRAINT family_states_updated_by_fkey
 -- lib/migrateEncryption.js (нужен Node, чистым SQL AES не сделать) — здесь только
 -- добавляем колонку под шифротекст.
 ALTER TABLE family_states ADD COLUMN IF NOT EXISTS data_enc bytea;
+
+-- ── Онбординг-письма 2-4 (перенос воронки из n8n) ────────────────────────────
+-- Письмо 1 (Welcome) шлётся сразу при регистрации в routes/auth.js. Дальше
+-- lib/onboardingScheduler.js считает дни от users.created_at и шлёт письма 2-4;
+-- эти колонки — дедуп-отметки, чтобы часовой прогон не отправил письмо дважды.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_email2_sent_at timestamptz;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_email3_sent_at timestamptz;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_email4_sent_at timestamptz;

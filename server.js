@@ -70,6 +70,23 @@ if (require.main === module) {
     process.exit(1);
   }
 
+  // Без JWT_SECRET jwt.sign() падает не при деплое, а на первом же логине
+  // реального пользователя — лучше не стартовать вовсе, чем узнать об этом так.
+  if (!process.env.JWT_SECRET) {
+    console.error('JWT_SECRET не задан — отказываюсь стартовать, иначе авторизация упадёт на первом логине.');
+    process.exit(1);
+  }
+
+  // Почта не так критична, чтобы блокировать старт (в отличие от ключа шифрования
+  // и JWT), но без неё тихо ломаются подтверждение email и сброс пароля. Раз Sentry/
+  // GlitchTip уже настроен — шлём туда алерт сразу при деплое, а не когда пользователь
+  // напишет в поддержку.
+  if (!require('./lib/mail').mailConfigured()) {
+    const msg = 'Почта не настроена (нет UNISENDER_API_KEY и SMTP_*) — подтверждение email и сброс пароля работать не будут';
+    console.error(msg);
+    Sentry.captureMessage(msg, 'warning');
+  }
+
   (async () => {
     try {
       await db.query(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
@@ -83,6 +100,7 @@ if (require.main === module) {
 
   require('./lib/scheduler').start();
   require('./lib/pushScheduler').start();
+  require('./lib/onboardingScheduler').start();
 
   const PORT = process.env.PORT || 3001;
   const server = app.listen(PORT, () => console.log('FamilyFlow API on :' + PORT));
