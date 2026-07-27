@@ -8,6 +8,8 @@ const db = require('../db');
 const auth = require('../middleware/auth');
 const ah = require('../middleware/asyncHandler');
 const { encryptJSON, decryptJSON, configured } = require('../lib/crypto');
+const validate = require('../middleware/validate');
+const { stateSchema } = require('../lib/schemas');
 
 const familyOf = async uid => {
   const r = await db.query('SELECT family_id FROM family_members WHERE user_id=$1', [uid]);
@@ -37,9 +39,8 @@ router.get('/', auth, ah(async (req, res) => {
   res.json({ familyId: fid, data, updatedAt: row?.updated_at || null });
 }));
 
-router.put('/', auth, ah(async (req, res) => {
+router.put('/', auth, validate(stateSchema), ah(async (req, res) => {
   const { data, baseUpdatedAt } = req.body || {};
-  if (typeof data !== 'object' || data === null) return res.status(400).json({ error: 'bad_data' });
   if (JSON.stringify(data).length > 2_000_000) return res.status(413).json({ error: 'too_large' });
   const fid = await familyOf(req.user.uid);
   if (!fid) return res.status(404).json({ error: 'no_family' });

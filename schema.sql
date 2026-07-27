@@ -138,3 +138,19 @@ ALTER TABLE family_states ADD COLUMN IF NOT EXISTS data_enc bytea;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_email2_sent_at timestamptz;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_email3_sent_at timestamptz;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_email4_sent_at timestamptz;
+
+-- ── Мягкое удаление аккаунта ─────────────────────────────────────────────────
+-- /auth/delete-account раньше удалял строку users сразу и безвозвратно — ошибочное
+-- или вынужденное (украденная сессия) удаление не оставляло шанса на восстановление.
+-- Теперь аккаунт помечается deleted_at и сразу перестаёт быть доступен (login и
+-- middleware/auth.js его не находят), а по-настоящему стирает строку
+-- lib/accountPurgeScheduler.js спустя грейс-период — этого достаточно для права
+-- на удаление по 152-ФЗ и не требует мгновенной необратимости.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+
+-- Табличный UNIQUE на email держал бы адрес мягко удалённого аккаунта занятым
+-- весь грейс-период — заменяем на частичный уникальный индекс: уникальность
+-- только среди живых аккаунтов, поэтому новый пользователь может сразу
+-- зарегистрироваться на тот же email, не дожидаясь окончательной очистки.
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_active_idx ON users(email) WHERE deleted_at IS NULL;

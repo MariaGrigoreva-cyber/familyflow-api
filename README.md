@@ -12,7 +12,7 @@
 | POST | /family/join | {code} → вступить в семью, вернёт её state |
 | GET | /state | снапшот бюджета семьи + updatedAt |
 | PUT | /state | {data, baseUpdatedAt} → сохранить; 409 при конфликте |
-| POST | /auth/delete-account | {password} → безвозвратно удаляет аккаунт (152-ФЗ); если владелец не единственный участник — семья передаётся следующему |
+| POST | /auth/delete-account | {password} → мягко удаляет аккаунт (152-ФЗ): логин и токены сразу отзываются, окончательное стирание — через `ACCOUNT_PURGE_GRACE_DAYS` дней (см. lib/accountPurgeScheduler.js); если владелец не единственный участник — семья передаётся следующему |
 | GET | /health | проверка живости и БД |
 
 Авторизация: заголовок `Authorization: Bearer <token>`.

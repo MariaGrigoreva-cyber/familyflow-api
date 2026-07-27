@@ -15,7 +15,7 @@ module.exports = async (req, res, next) => {
     return res.status(401).json({ error: 'bad_token' });
   }
   try {
-    const r = await db.query('SELECT token_version FROM users WHERE id=$1', [payload.uid]);
+    const r = await db.query('SELECT token_version FROM users WHERE id=$1 AND deleted_at IS NULL', [payload.uid]);
     // Токены, выданные до появления token_version, не несут tv в payload —
     // schema.sql выставляет таким пользователям token_version=1 по умолчанию,
     // поэтому отсутствующий tv трактуем как 1, а не как заведомое несовпадение.

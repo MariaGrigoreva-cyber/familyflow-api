@@ -6,6 +6,8 @@ const authMw = require('../middleware/auth');
 const ah = require('../middleware/asyncHandler');
 const yk = require('../lib/yookassa');
 const { applySucceededPayment, computePlan } = require('../lib/billingLogic');
+const validate = require('../middleware/validate');
+const { billingCheckoutSchema } = require('../lib/schemas');
 
 const PRICE = {
   monthly: Number(process.env.PRICE_MONTHLY_RUB || 199),
@@ -34,10 +36,8 @@ router.get('/status', authMw, ah(async (req, res) => {
   });
 }));
 
-router.post('/checkout', authMw, ah(async (req, res) => {
+router.post('/checkout', authMw, validate(billingCheckoutSchema), ah(async (req, res) => {
   const { period, autoChargeConsent } = req.body || {};
-  if (period !== 'monthly' && period !== 'yearly') return res.status(400).json({ error: 'bad_period' });
-  if (autoChargeConsent !== true) return res.status(400).json({ error: 'auto_charge_consent_required' });
   const m = await db.query("SELECT family_id FROM family_members WHERE user_id=$1 AND role='owner'", [req.user.uid]);
   if (!m.rows.length) return res.status(403).json({ error: 'owner_only' });
   const familyId = m.rows[0].family_id;
