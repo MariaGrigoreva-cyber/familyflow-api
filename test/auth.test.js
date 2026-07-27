@@ -52,6 +52,18 @@ describe('POST /auth/login', () => {
 });
 
 describe('ревокация токена (token_version)', () => {
+  test('токен без tv (выданный до появления ревокации) остаётся рабочим', async () => {
+    // Regression: до token_version токены подписывались без tv в payload.
+    // schema.sql выставляет существующим пользователям token_version=1 по
+    // умолчанию — отсутствующий tv должен трактоваться как 1, а не как
+    // несовпадение, иначе деплой этой фичи разлогинил бы всех разом.
+    const jwt = require('jsonwebtoken');
+    const u = await registerUser();
+    const legacyToken = jwt.sign({ uid: (await db.query('SELECT id FROM users WHERE email=lower($1)', [u.email])).rows[0].id }, process.env.JWT_SECRET, { expiresIn: '90d' });
+    const res = await request.get('/auth/me').set('Authorization', `Bearer ${legacyToken}`);
+    expect(res.status).toBe(200);
+  });
+
   test('смена пароля отзывает старый токен, но выдаёт новый рабочий', async () => {
     const u = await registerUser();
     const changeRes = await request.post('/auth/change-password')

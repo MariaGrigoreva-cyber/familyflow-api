@@ -16,7 +16,11 @@ module.exports = async (req, res, next) => {
   }
   try {
     const r = await db.query('SELECT token_version FROM users WHERE id=$1', [payload.uid]);
-    if (!r.rows.length || r.rows[0].token_version !== payload.tv) {
+    // Токены, выданные до появления token_version, не несут tv в payload —
+    // schema.sql выставляет таким пользователям token_version=1 по умолчанию,
+    // поэтому отсутствующий tv трактуем как 1, а не как заведомое несовпадение.
+    // Иначе ревокация задним числом разлогинивала бы всех, кто не менял пароль.
+    if (!r.rows.length || r.rows[0].token_version !== (payload.tv ?? 1)) {
       return res.status(401).json({ error: 'token_revoked' });
     }
   } catch (e) {
