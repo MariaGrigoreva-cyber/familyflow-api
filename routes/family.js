@@ -4,6 +4,8 @@ const db = require('../db');
 const auth = require('../middleware/auth');
 const ah = require('../middleware/asyncHandler');
 const { computePlan } = require('../lib/billingLogic');
+const validate = require('../middleware/validate');
+const { familyJoinSchema } = require('../lib/schemas');
 
 const CODE_ABC = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // без похожих символов
 const genCode = () => Array.from({ length: 6 }, () => CODE_ABC[Math.floor(Math.random() * CODE_ABC.length)]).join('');
@@ -34,9 +36,8 @@ router.post('/invite', auth, ah(async (req, res) => {
   res.json({ code });
 }));
 
-router.post('/join', auth, ah(async (req, res) => {
-  const code = String(req.body?.code || '').trim().toUpperCase();
-  if (code.length !== 6) return res.status(400).json({ error: 'bad_code' });
+router.post('/join', auth, validate(familyJoinSchema), ah(async (req, res) => {
+  const { code } = req.body;
   const f = await db.query('SELECT id FROM families WHERE invite_code=$1', [code]);
   if (!f.rows.length) return res.status(404).json({ error: 'code_not_found' });
   const fid = f.rows[0].id;

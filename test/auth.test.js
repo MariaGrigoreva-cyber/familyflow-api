@@ -116,19 +116,47 @@ describe('POST /auth/delete-account', () => {
     expect(still.rows).toHaveLength(1);
   });
 
-  test('единственный участник семьи — семья и её state удаляются целиком', async () => {
+  test('единственный участник семьи — семья и её state удаляются целиком, аккаунт помечается deleted_at (мягкое удаление)', async () => {
     const u = await registerUser();
     const res = await request.post('/auth/delete-account')
       .set('Authorization', `Bearer ${u.token}`)
       .send({ password: u.password });
     expect(res.status).toBe(200);
 
-    const users = await db.query('SELECT 1 FROM users WHERE email=lower($1)', [u.email]);
-    expect(users.rows).toHaveLength(0);
+    // Строка не удаляется сразу — только помечается deleted_at (см. schema.sql
+    // и lib/accountPurgeScheduler.js), чтобы ошибочное удаление было восстановимо.
+    const users = await db.query('SELECT deleted_at, token_version FROM users WHERE email=lower($1)', [u.email]);
+    expect(users.rows).toHaveLength(1);
+    expect(users.rows[0].deleted_at).not.toBeNull();
+    expect(users.rows[0].token_version).toBe(2);
+    const membership = await db.query('SELECT 1 FROM family_members WHERE user_id=(SELECT id FROM users WHERE email=lower($1))', [u.email]);
+    expect(membership.rows).toHaveLength(0);
     const families = await db.query('SELECT 1 FROM families WHERE id=$1', [u.familyId]);
     expect(families.rows).toHaveLength(0);
     const states = await db.query('SELECT 1 FROM family_states WHERE family_id=$1', [u.familyId]);
     expect(states.rows).toHaveLength(0);
+  });
+
+  test('после мягкого удаления: старый токен отозван, вход невозможен, тот же email можно зарегистрировать заново', async () => {
+    const u = await registerUser();
+    const delRes = await request.post('/auth/delete-account')
+      .set('Authorization', `Bearer ${u.token}`)
+      .send({ password: u.password });
+    expect(delRes.status).toBe(200);
+
+    const meRes = await request.get('/auth/me').set('Authorization', `Bearer ${u.token}`);
+    expect(meRes.status).toBe(401);
+    expect(meRes.body.error).toBe('token_revoked');
+
+    const loginRes = await request.post('/auth/login').send({ email: u.email, password: u.password });
+    expect(loginRes.status).toBe(401);
+    expect(loginRes.body.error).toBe('bad_credentials');
+
+    // Частичный уникальный индекс (WHERE deleted_at IS NULL) не должен мешать
+    // новой регистрации на тот же адрес, пока старая (удалённая) строка ждёт
+    // окончательной очистки по расписанию.
+    const reRegisterRes = await request.post('/auth/register').send({ email: u.email, password: 'newpassword1', pdnConsent: true });
+    expect(reRegisterRes.status).toBe(200);
   });
 
   test('владелец с другими участниками — владение переходит следующему, семья остаётся', async () => {

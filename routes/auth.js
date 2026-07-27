@@ -8,11 +8,12 @@ const db = require('../db');
 const ah = require('../middleware/asyncHandler');
 const authMw = require('../middleware/auth');
 const { sendMail, mailConfigured, escapeHtml, textToHtml } = require('../lib/mail');
+const validate = require('../middleware/validate');
+const { registerSchema, loginSchema, changePasswordSchema, resetRequestSchema, resetConfirmSchema } = require('../lib/schemas');
 
 // tv (token_version) — см. middleware/auth.js: смена/сброс пароля увеличивает
 // версию в БД и тем самым отзывает все ранее выданные токены.
 const sign = (uid, tv) => jwt.sign({ uid, tv }, process.env.JWT_SECRET, { expiresIn: '90d' });
-const emailOk = e => typeof e === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
 // Строже общего лимита на /auth — это конкретно подбор пароля и подбор
 // 6-значного кода сброса, самые ценные цели для брутфорса.
@@ -24,11 +25,8 @@ const strictLimiter = rateLimit({
   message: { error: 'too_many_requests' },
 });
 
-router.post('/register', ah(async (req, res) => {
+router.post('/register', validate(registerSchema), ah(async (req, res) => {
   const { email, password, familyName, pdnConsent } = req.body || {};
-  if (!emailOk(email)) return res.status(400).json({ error: 'bad_email' });
-  if (!password || password.length < 6) return res.status(400).json({ error: 'short_password' });
-  if (pdnConsent !== true) return res.status(400).json({ error: 'pdn_consent_required' });
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -118,10 +116,11 @@ router.post('/register', ah(async (req, res) => {
   }
 }));
 
-router.post('/login', strictLimiter, ah(async (req, res) => {
+router.post('/login', strictLimiter, validate(loginSchema), ah(async (req, res) => {
   const { email, password } = req.body || {};
-  if (!emailOk(email) || !password) return res.status(400).json({ error: 'bad_credentials' });
-  const r = await db.query('SELECT id, pass_hash, token_version FROM users WHERE email = lower($1)', [email]);
+  // Мягко удалённый аккаунт (deleted_at) для логина не отличается от «нет такого
+  // пользователя» — не раскрываем сам факт удаления попыткой входа.
+  const r = await db.query('SELECT id, pass_hash, token_version FROM users WHERE email = lower($1) AND deleted_at IS NULL', [email]);
   if (!r.rows.length) return res.status(401).json({ error: 'bad_credentials' });
   const ok = await bcrypt.compare(password, r.rows[0].pass_hash);
   if (!ok) return res.status(401).json({ error: 'bad_credentials' });
@@ -130,9 +129,8 @@ router.post('/login', strictLimiter, ah(async (req, res) => {
 
 
 // ── Смена пароля (для залогиненных) ────────────────────────────────────────
-router.post('/change-password', authMw, ah(async (req, res) => {
+router.post('/change-password', authMw, validate(changePasswordSchema), ah(async (req, res) => {
   const { oldPassword, newPassword } = req.body || {};
-  if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'short_password' });
   const r = await db.query('SELECT pass_hash FROM users WHERE id=$1', [req.user.uid]);
   if (!r.rows.length) return res.status(404).json({ error: 'no_user' });
   const ok = await bcrypt.compare(oldPassword || '', r.rows[0].pass_hash);
@@ -181,9 +179,18 @@ router.post('/delete-account', authMw, strictLimiter, ah(async (req, res) => {
         );
       }
     }
-    // Каскадно удаляет оставшуюся запись family_members (если семья не снесена целиком
-    // выше) и все push_subscriptions пользователя.
-    await client.query('DELETE FROM users WHERE id=$1', [req.user.uid]);
+    // Раньше DELETE FROM users каскадно сносил и family_members, и push_subscriptions —
+    // теперь строку users не удаляем сразу (мягкое удаление, см. schema.sql), поэтому
+    // убираем обе записи явно.
+    await client.query('DELETE FROM family_members WHERE user_id=$1', [req.user.uid]);
+    await client.query('DELETE FROM push_subscriptions WHERE user_id=$1', [req.user.uid]);
+    // deleted_at запрещает и логин, и повторную выдачу токена; token_version+1 отзывает
+    // все уже выданные. Настоящее стирание строки (право на удаление по 152-ФЗ) делает
+    // lib/accountPurgeScheduler.js спустя грейс-период — на случай ошибочного удаления.
+    await client.query(
+      'UPDATE users SET deleted_at=now(), token_version=token_version+1 WHERE id=$1',
+      [req.user.uid]
+    );
     await client.query('COMMIT');
     res.json({ ok: true });
   } catch (e) {
@@ -195,9 +202,8 @@ router.post('/delete-account', authMw, strictLimiter, ah(async (req, res) => {
   }
 }));
 
-router.post('/reset-request', ah(async (req, res) => {
+router.post('/reset-request', validate(resetRequestSchema), ah(async (req, res) => {
   const { email } = req.body || {};
-  if (!emailOk(email)) return res.status(400).json({ error: 'bad_email' });
   if (!mailConfigured()) return res.status(503).json({ error: 'mail_unavailable' });
   const u = await db.query('SELECT id FROM users WHERE email=lower($1)', [email]);
   // Не раскрываем, существует ли аккаунт — отвечаем одинаково
@@ -221,10 +227,8 @@ router.post('/reset-request', ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
-router.post('/reset-confirm', strictLimiter, ah(async (req, res) => {
+router.post('/reset-confirm', strictLimiter, validate(resetConfirmSchema), ah(async (req, res) => {
   const { email, code, newPassword } = req.body || {};
-  if (!emailOk(email) || !code) return res.status(400).json({ error: 'bad_request' });
-  if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'short_password' });
   const u = await db.query(
     `SELECT id, reset_hash FROM users
       WHERE email=lower($1) AND reset_hash IS NOT NULL AND reset_expires > now()`, [email]);

@@ -4,14 +4,15 @@ const router = require('express').Router();
 const db = require('../db');
 const authMw = require('../middleware/auth');
 const ah = require('../middleware/asyncHandler');
+const validate = require('../middleware/validate');
+const { pushSubscribeSchema } = require('../lib/schemas');
 
 router.get('/vapid-public-key', (req, res) => {
   res.json({ publicKey: process.env.VAPID_PUBLIC_KEY || null });
 });
 
-router.post('/subscribe', authMw, ah(async (req, res) => {
+router.post('/subscribe', authMw, validate(pushSubscribeSchema), ah(async (req, res) => {
   const { endpoint, keys } = req.body || {};
-  if (!endpoint || !keys?.p256dh || !keys?.auth) return res.status(400).json({ error: 'bad_subscription' });
   await db.query(
     `INSERT INTO push_subscriptions(user_id, endpoint, p256dh, auth) VALUES($1,$2,$3,$4)
      ON CONFLICT (endpoint) DO UPDATE SET user_id=$1, p256dh=$3, auth=$4`,
