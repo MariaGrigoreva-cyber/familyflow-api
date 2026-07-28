@@ -27,4 +27,11 @@ describe('computePlan', () => {
     const now = new Date();
     expect(computePlan({ trial_ends_at: null, pro_until: now.toISOString() })).toBe('free');
   });
+
+  // Оплата подписки во время ещё активного триала — раньше computePlan всё
+  // равно возвращал 'trial' (проверка триала шла первой), и экран после успешной
+  // оплаты выглядел так, будто платёж не подействовал вообще.
+  test('триал ещё активен, но уже есть оплаченный pro_until — pro (платёж не должен "теряться")', () => {
+    expect(computePlan({ trial_ends_at: hoursFromNow(24 * 20), pro_until: hoursFromNow(24 * 50) })).toBe('pro');
+  });
 });
