@@ -16,6 +16,10 @@ const familyOf = async uid => {
   return r.rows[0]?.family_id || null;
 };
 
+// Держим в синхроне с lib/stateResetPurgeScheduler.js — там та же переменная
+// окружения определяет, когда бэкап сброса стирается по-настоящему.
+const RESET_GRACE_DAYS = Number(process.env.STATE_RESET_GRACE_DAYS || 90);
+
 // data_enc, если есть, всегда авторитетнее — data остаётся только для строк,
 // созданных до включения шифрования (или если DATA_ENC_KEY вообще не задан).
 const readData = row => {
@@ -31,12 +35,15 @@ router.get('/', auth, ah(async (req, res) => {
   const fid = await familyOf(req.user.uid);
   if (!fid) return res.status(404).json({ error: 'no_family' });
   const r = await db.query(
-    'SELECT data, data_enc, updated_at FROM family_states WHERE family_id=$1', [fid]);
+    'SELECT data, data_enc, updated_at, reset_at FROM family_states WHERE family_id=$1', [fid]);
   const row = r.rows[0];
   let data;
   try { data = readData(row); }
   catch (e) { return res.status(e.status || 500).json({ error: e.message }); }
-  res.json({ familyId: fid, data, updatedAt: row?.updated_at || null });
+  const resetBackup = row?.reset_at
+    ? { resetAt: row.reset_at, expiresAt: new Date(row.reset_at.getTime() + RESET_GRACE_DAYS * 86400000) }
+    : null;
+  res.json({ familyId: fid, data, updatedAt: row?.updated_at || null, resetBackup });
 }));
 
 router.put('/', auth, validate(stateSchema), ah(async (req, res) => {
@@ -65,6 +72,55 @@ router.put('/', auth, validate(stateSchema), ah(async (req, res) => {
      ON CONFLICT (family_id) DO UPDATE SET data=$2, data_enc=$3, updated_at=now(), updated_by=$4
      RETURNING updated_at`,
     [fid, plainVal, encBuf, req.user.uid]);
+  res.json({ ok: true, updatedAt: r.rows[0].updated_at });
+}));
+
+// «Сбросить все данные и начать заново» в Настройках — вместо необратимого PUT
+// пустым data сначала переносим текущее состояние в reset_backup(_enc) с отметкой
+// времени, и только потом обнуляем рабочие data/data_enc. Все SET-выражения в
+// одном UPDATE читают значения ДО изменения, так что бэкап атомарно захватывает
+// именно то, что стирается этим же запросом.
+router.post('/reset', auth, ah(async (req, res) => {
+  const fid = await familyOf(req.user.uid);
+  if (!fid) return res.status(404).json({ error: 'no_family' });
+
+  const r = await db.query(
+    `UPDATE family_states
+     SET reset_backup = data, reset_backup_enc = data_enc, reset_at = now(),
+         data = '{}'::jsonb, data_enc = NULL, updated_at = now(), updated_by = $2
+     WHERE family_id = $1
+     RETURNING updated_at`,
+    [fid, req.user.uid]);
+
+  if (!r.rows[0]) {
+    // Строки для этой семьи ещё не было — бэкапить нечего, просто заводим пустую.
+    await db.query(
+      `INSERT INTO family_states(family_id, data, updated_at, updated_by)
+       VALUES($1, '{}'::jsonb, now(), $2) ON CONFLICT (family_id) DO NOTHING`,
+      [fid, req.user.uid]);
+    return res.json({ ok: true, updatedAt: new Date().toISOString() });
+  }
+  res.json({ ok: true, updatedAt: r.rows[0].updated_at });
+}));
+
+// Возврат данных из окна отложенного удаления (см. п. выше и
+// lib/stateResetPurgeScheduler.js). COALESCE на data обязателен: колонка NOT NULL,
+// а reset_backup останется NULL, если семья использовала шифрование (данные лежали
+// только в reset_backup_enc).
+router.post('/restore-backup', auth, ah(async (req, res) => {
+  const fid = await familyOf(req.user.uid);
+  if (!fid) return res.status(404).json({ error: 'no_family' });
+
+  const r = await db.query(
+    `UPDATE family_states
+     SET data = COALESCE(reset_backup, '{}'::jsonb), data_enc = reset_backup_enc,
+         reset_backup = NULL, reset_backup_enc = NULL, reset_at = NULL,
+         updated_at = now(), updated_by = $2
+     WHERE family_id = $1 AND reset_at IS NOT NULL
+     RETURNING updated_at`,
+    [fid, req.user.uid]);
+
+  if (!r.rows[0]) return res.status(404).json({ error: 'no_backup' });
   res.json({ ok: true, updatedAt: r.rows[0].updated_at });
 }));
 

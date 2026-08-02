@@ -102,6 +102,7 @@ if (require.main === module) {
   require('./lib/pushScheduler').start();
   require('./lib/onboardingScheduler').start();
   require('./lib/accountPurgeScheduler').start();
+  require('./lib/stateResetPurgeScheduler').start();
 
   const PORT = process.env.PORT || 3001;
   const server = app.listen(PORT, () => console.log('FamilyFlow API on :' + PORT));

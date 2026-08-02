@@ -191,3 +191,81 @@ describe('PUT /state — без DATA_ENC_KEY (шифрование выключ�
     expect(row.rows[0].data_enc).toBeNull();
   });
 });
+
+describe('POST /state/reset и /state/restore-backup — отложенное удаление', () => {
+  test('без токена — 401', async () => {
+    expect((await request.post('/state/reset')).status).toBe(401);
+    expect((await request.post('/state/restore-backup')).status).toBe(401);
+  });
+
+  test('reset обнуляет data, но не теряет её — restore-backup возвращает как было', async () => {
+    const u = await registerUser();
+    const payload = { appState: { streak: 7, familyName: 'Реальный бюджет' } };
+    await request.put('/state').set('Authorization', `Bearer ${u.token}`).send({ data: payload });
+
+    const resetRes = await request.post('/state/reset').set('Authorization', `Bearer ${u.token}`);
+    expect(resetRes.status).toBe(200);
+    expect(resetRes.body.ok).toBe(true);
+
+    // Сразу после сброса — данные пустые, но восстановление доступно
+    const afterReset = await request.get('/state').set('Authorization', `Bearer ${u.token}`);
+    expect(afterReset.body.data).toEqual({});
+    expect(afterReset.body.resetBackup).toBeTruthy();
+    expect(afterReset.body.resetBackup.resetAt).toBeTruthy();
+    expect(afterReset.body.resetBackup.expiresAt).toBeTruthy();
+
+    const restoreRes = await request.post('/state/restore-backup').set('Authorization', `Bearer ${u.token}`);
+    expect(restoreRes.status).toBe(200);
+
+    const afterRestore = await request.get('/state').set('Authorization', `Bearer ${u.token}`);
+    expect(afterRestore.body.data).toEqual(payload);
+    expect(afterRestore.body.resetBackup).toBeNull(); // бэкап потрачен, повторно не предлагается
+  });
+
+  test('повторный restore-backup без активного бэкапа — 404 no_backup', async () => {
+    const u = await registerUser();
+    const res = await request.post('/state/restore-backup').set('Authorization', `Bearer ${u.token}`);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('no_backup');
+  });
+
+  test('reset дважды подряд — второй раз бэкапится уже пустое состояние, но не падает', async () => {
+    const u = await registerUser();
+    await request.put('/state').set('Authorization', `Bearer ${u.token}`).send({ data: { appState: { v: 1 } } });
+    await request.post('/state/reset').set('Authorization', `Bearer ${u.token}`);
+    const second = await request.post('/state/reset').set('Authorization', `Bearer ${u.token}`);
+    expect(second.status).toBe(200);
+    const getRes = await request.get('/state').set('Authorization', `Bearer ${u.token}`);
+    expect(getRes.body.data).toEqual({});
+  });
+
+  test('404 no_family, если пользователь не состоит в семье', async () => {
+    const u = await registerUser();
+    const uid = (await db.query('SELECT id FROM users WHERE email=lower($1)', [u.email])).rows[0].id;
+    await db.query('DELETE FROM family_members WHERE user_id=$1', [uid]);
+    expect((await request.post('/state/reset').set('Authorization', `Bearer ${u.token}`)).status).toBe(404);
+    expect((await request.post('/state/restore-backup').set('Authorization', `Bearer ${u.token}`)).status).toBe(404);
+  });
+
+  test('шифрование включено: reset/restore-backup работают через data_enc, не только data', async () => {
+    const originalKey = process.env.DATA_ENC_KEY;
+    process.env.DATA_ENC_KEY = crypto.randomBytes(32).toString('hex');
+    try {
+      const u = await registerUser();
+      const payload = { appState: { secret: 'зашифрованный бюджет' } };
+      await request.put('/state').set('Authorization', `Bearer ${u.token}`).send({ data: payload });
+
+      await request.post('/state/reset').set('Authorization', `Bearer ${u.token}`);
+      const row = await db.query('SELECT data, data_enc, reset_backup, reset_backup_enc FROM family_states WHERE family_id=$1', [u.familyId]);
+      expect(row.rows[0].data_enc).toBeNull(); // текущее состояние обнулено
+      expect(Buffer.isBuffer(row.rows[0].reset_backup_enc)).toBe(true); // а бэкап зашифрован и сохранён
+
+      await request.post('/state/restore-backup').set('Authorization', `Bearer ${u.token}`);
+      const getRes = await request.get('/state').set('Authorization', `Bearer ${u.token}`);
+      expect(getRes.body.data).toEqual(payload);
+    } finally {
+      if (originalKey === undefined) delete process.env.DATA_ENC_KEY;
+      else process.env.DATA_ENC_KEY = originalKey;
+    }
+  });
+});

@@ -154,3 +154,15 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
 -- зарегистрироваться на тот же email, не дожидаясь окончательной очистки.
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_active_idx ON users(email) WHERE deleted_at IS NULL;
+
+-- ── Отложенное удаление бюджета (кнопка «Сбросить все данные») ──────────────
+-- POST /state/reset раньше (через обычный PUT /state с data:{}) стирал бюджет
+-- необратимо — один случайный клик терял всё без права на восстановление.
+-- Теперь /state/reset сначала копирует текущее data/data_enc в reset_backup(_enc)
+-- с отметкой reset_at, и только потом обнуляет — окно на восстановление даёт
+-- POST /state/restore-backup, а lib/stateResetPurgeScheduler.js стирает забытую
+-- копию по-настоящему спустя грейс-период (тот же принцип, что и у мягкого
+-- удаления аккаунта выше).
+ALTER TABLE family_states ADD COLUMN IF NOT EXISTS reset_backup jsonb;
+ALTER TABLE family_states ADD COLUMN IF NOT EXISTS reset_backup_enc bytea;
+ALTER TABLE family_states ADD COLUMN IF NOT EXISTS reset_at timestamptz;
