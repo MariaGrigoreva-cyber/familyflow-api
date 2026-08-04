@@ -35,6 +35,9 @@ const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'too_many_requests' },
+  // См. комментарий у strictLimiter в routes/auth.js — тот же счётчик-на-весь-файл
+  // эффект, только этот лимитер шире (весь /auth) и потому ловит его первым.
+  skip: () => process.env.NODE_ENV === 'test',
 });
 
 app.get('/health', async (_req, res) => {

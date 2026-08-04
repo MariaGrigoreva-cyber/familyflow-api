@@ -23,6 +23,10 @@ const strictLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'too_many_requests' },
+  // Счётчик общий на все тесты файла (не сбрасывается между test()) — без skip
+  // достаточно длинный тестовый файл сам себя рано или поздно рейт-лимитит,
+  // без всякой связи с тем, что тесты реально проверяют.
+  skip: () => process.env.NODE_ENV === 'test',
 });
 
 router.post('/register', validate(registerSchema), ah(async (req, res) => {
