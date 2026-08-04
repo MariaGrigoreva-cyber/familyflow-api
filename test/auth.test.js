@@ -105,6 +105,88 @@ describe('ревокация токена (token_version)', () => {
   });
 });
 
+describe('GET /auth/yandex/callback', () => {
+  const realFetch = global.fetch;
+  const savedId = process.env.YANDEX_CLIENT_ID;
+  const savedSecret = process.env.YANDEX_CLIENT_SECRET;
+
+  beforeEach(() => {
+    process.env.YANDEX_CLIENT_ID = 'test-client-id';
+    process.env.YANDEX_CLIENT_SECRET = 'test-client-secret';
+  });
+  afterEach(() => {
+    global.fetch = realFetch;
+    process.env.YANDEX_CLIENT_ID = savedId;
+    process.env.YANDEX_CLIENT_SECRET = savedSecret;
+  });
+
+  // Первый fetch — обмен code на access_token (oauth.yandex.ru/token), второй —
+  // сведения о пользователе (login.yandex.ru/info).
+  function mockYandex(email) {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'yandex-access-token' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ default_email: email }) });
+  }
+
+  test('новый email — создаёт аккаунт и семью, редиректит с токеном во фрагменте', async () => {
+    const email = uniqueEmail();
+    mockYandex(email);
+    const res = await request.get('/auth/yandex/callback?code=abc');
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toMatch(/#yandex_token=/);
+
+    const u = await db.query('SELECT email_verified_at, pdn_consent_at FROM users WHERE email=$1', [email]);
+    expect(u.rows).toHaveLength(1);
+    expect(u.rows[0].email_verified_at).not.toBeNull(); // Яндекс уже подтвердил почту на своей стороне
+    expect(u.rows[0].pdn_consent_at).not.toBeNull();
+
+    const m = await db.query(
+      `SELECT fm.role FROM family_members fm JOIN users usr ON usr.id=fm.user_id WHERE usr.email=$1`, [email]
+    );
+    expect(m.rows).toHaveLength(1);
+    expect(m.rows[0].role).toBe('owner');
+  });
+
+  test('уже существующий email — логинит в тот же аккаунт, новую семью не заводит', async () => {
+    const existing = await registerUser();
+    mockYandex(existing.email);
+    const res = await request.get('/auth/yandex/callback?code=abc');
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toMatch(/#yandex_token=/);
+
+    const families = await db.query(
+      `SELECT count(*)::int AS n FROM family_members fm JOIN users usr ON usr.id=fm.user_id WHERE usr.email=lower($1)`,
+      [existing.email]
+    );
+    expect(families.rows[0].n).toBe(1);
+  });
+
+  test('без кода — редирект с ошибкой no_code, без обращения к Яндексу', async () => {
+    global.fetch = jest.fn();
+    const res = await request.get('/auth/yandex/callback');
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toMatch(/yandex_error=no_code/);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('YANDEX_CLIENT_ID/SECRET не заданы — редирект с not_configured', async () => {
+    delete process.env.YANDEX_CLIENT_ID;
+    delete process.env.YANDEX_CLIENT_SECRET;
+    const res = await request.get('/auth/yandex/callback?code=abc');
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toMatch(/yandex_error=not_configured/);
+  });
+
+  test('Яндекс не выдал почту — редирект с no_email, аккаунт не создаётся', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'yandex-access-token' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({}) });
+    const res = await request.get('/auth/yandex/callback?code=abc');
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toMatch(/yandex_error=no_email/);
+  });
+});
+
 describe('POST /auth/delete-account', () => {
   test('неверный пароль — 401, аккаунт не тронут', async () => {
     const u = await registerUser();

@@ -273,6 +273,105 @@ router.get('/verify-email', ah(async (req, res) => {
   res.send('Email подтверждён! Можно закрыть эту страницу и вернуться в приложение.');
 }));
 
+// ── Вход через Яндекс ID ─────────────────────────────────────────────────
+// Отдельного /auth/yandex/start нет: client_id не секретен, фронтенд сам
+// ссылается на oauth.yandex.ru/authorize с redirect_uri сюда. Секрет нужен
+// только здесь — при обмене code на access_token на сервере.
+router.get('/yandex/callback', ah(async (req, res) => {
+  const frontendUrl = (process.env.CORS_ORIGIN || '').split(',')[0].trim();
+  const fail = reason => res.redirect(302, `${frontendUrl}/#yandex_error=${encodeURIComponent(reason)}`);
+
+  const code = String(req.query.code || '');
+  if (!code) return fail('no_code');
+  if (!process.env.YANDEX_CLIENT_ID || !process.env.YANDEX_CLIENT_SECRET) {
+    console.error('Yandex OAuth: YANDEX_CLIENT_ID/YANDEX_CLIENT_SECRET не заданы');
+    return fail('not_configured');
+  }
+
+  let accessToken;
+  try {
+    const tokenRes = await fetch('https://oauth.yandex.ru/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        client_id: process.env.YANDEX_CLIENT_ID,
+        client_secret: process.env.YANDEX_CLIENT_SECRET,
+      }),
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenRes.ok || !tokenData.access_token) throw new Error(tokenData.error_description || tokenData.error || 'token_exchange_failed');
+    accessToken = tokenData.access_token;
+  } catch (e) {
+    console.error('Yandex OAuth token exchange:', e.message);
+    return fail('yandex_unavailable');
+  }
+
+  let email;
+  try {
+    const infoRes = await fetch('https://login.yandex.ru/info?format=json', {
+      headers: { Authorization: `OAuth ${accessToken}` },
+    });
+    if (!infoRes.ok) throw new Error(`login.yandex.ru: ${infoRes.status}`);
+    const info = await infoRes.json();
+    email = String(info.default_email || (info.emails && info.emails[0]) || '').toLowerCase();
+  } catch (e) {
+    console.error('Yandex OAuth user info:', e.message);
+    return fail('yandex_unavailable');
+  }
+  if (!email) return fail('no_email'); // пользователь не выдал доступ к почте на экране согласия Яндекса
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query(
+      'SELECT id, token_version FROM users WHERE email=$1 AND deleted_at IS NULL', [email]
+    );
+    let userId, tokenVersion;
+    if (existing.rows.length) {
+      // Уже есть аккаунт с этим email (неважно, заведён паролем или Яндексом
+      // раньше) — просто входим в него, отдельного «связывания» не делаем.
+      ({ id: userId, token_version: tokenVersion } = existing.rows[0]);
+    } else {
+      // pass_hash обязателен схемой, но пароль осознанно никому не известен —
+      // войти можно только через Яндекс, пока пользователь сам не задаст пароль
+      // через «Забыли пароль». Email Яндекс уже проверил на своей стороне,
+      // поэтому сразу считаем его подтверждённым и не шлём письмо с подтверждением.
+      const unusablePass = crypto.randomBytes(32).toString('hex');
+      const hash = await bcrypt.hash(unusablePass, 10);
+      const u = await client.query(
+        `INSERT INTO users(email, pass_hash, email_verified_at, pdn_consent_at, pdn_consent_ip)
+         VALUES($1, $2, now(), now(), $3) RETURNING id, token_version`,
+        [email, hash, req.ip]
+      );
+      ({ id: userId, token_version: tokenVersion } = u.rows[0]);
+      const f = await client.query(
+        `INSERT INTO families(name, trial_ends_at) VALUES($1, now() + interval '30 days') RETURNING id`,
+        ['Моя семья']
+      );
+      await client.query(
+        "INSERT INTO family_members(family_id, user_id, role) VALUES($1, $2, 'owner')",
+        [f.rows[0].id, userId]
+      );
+      await client.query(
+        'INSERT INTO family_states(family_id, data, updated_by) VALUES($1, $2, $3)',
+        [f.rows[0].id, '{}', userId]
+      );
+    }
+    await client.query('COMMIT');
+    // Токен — во фрагменте (#), не в query: не попадает в access-логи сервера
+    // и в заголовок Referer при переходе дальше.
+    res.redirect(302, `${frontendUrl}/#yandex_token=${sign(userId, tokenVersion)}`);
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    console.error('Yandex OAuth account:', e);
+    fail('server');
+  } finally {
+    client.release();
+  }
+}));
+
 router.post('/resend-verification', authMw, ah(async (req, res) => {
   const u = await db.query('SELECT email, email_verified_at FROM users WHERE id=$1', [req.user.uid]);
   if (!u.rows.length) return res.status(404).json({ error: 'no_user' });
