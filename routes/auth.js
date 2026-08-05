@@ -7,7 +7,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('../db');
 const ah = require('../middleware/asyncHandler');
 const authMw = require('../middleware/auth');
-const { sendMail, mailConfigured, escapeHtml, textToHtml } = require('../lib/mail');
+const { sendMail, mailConfigured, renderTemplate, unsubscribeUrl, verifyUnsubscribeToken } = require('../lib/mail');
 const validate = require('../middleware/validate');
 const { registerSchema, loginSchema, changePasswordSchema, resetRequestSchema, resetConfirmSchema } = require('../lib/schemas');
 
@@ -62,46 +62,11 @@ router.post('/register', validate(registerSchema), ah(async (req, res) => {
 
     if (mailConfigured()) {
       const verifyLink = `${req.protocol}://${req.get('host')}/auth/verify-email?token=${verifyToken}`;
-      const body = `Подтвердите свой email, чтобы не потерять доступ при восстановлении пароля: ${verifyLink}
-
-Добро пожаловать в Семейный Поток — приложение, которое помогает планировать семейные финансы не только на сегодня, но и на месяцы вперёд.
-
-Мы создали его для одной простой цели: чтобы вы в любой момент могли ответить на вопросы:
-
-Хватит ли нам денег на всё запланированное?
-Что мы можем себе позволить?
-Что ждёт нас через несколько месяцев?
-
-Начать очень просто.
-
-Шаг 1. Добавьте доходы
-
-Укажите зарплату и другие регулярные поступления. Если доход меняется от месяца к месяцу — это тоже можно учесть.
-
-Шаг 2. Запланируйте расходы
-
-Добавьте регулярные платежи и расходы, которые точно предстоят: жильё, кредиты, детский сад, подписки и другие обязательства.
-
-Шаг 3. Вспомните о важных событиях
-
-Отпуск, день рождения, школа, страховка, ремонт, крупная покупка — именно такие расходы часто становятся неожиданностью, если не учесть их заранее.
-
-Шаг 4. Посмотрите на год вперёд
-
-Теперь вы сможете увидеть общую картину: сколько денег придёт, сколько уйдёт и какой остаток останется после всех запланированных расходов.
-
-Не стремитесь сразу заполнить всё идеально.
-
-Начните с того, что знаете точно. Постепенно добавляйте детали — и ваш финансовый план будет становиться всё точнее.
-
-Главное — начать видеть не только сегодняшний баланс, но и своё финансовое будущее.`;
-      const signoff = 'Ваш Семейный Поток ❤️';
-      sendMail(
-        email,
-        'Добро пожаловать в Семейный Поток',
-        `${body}\n\n${signoff}`,
-        `${textToHtml(body)}\n<p>${escapeHtml(signoff)}</p>`
-      ).then(
+      const mail = renderTemplate('1-welcome', {
+        VERIFY_URL: verifyLink,
+        UNSUBSCRIBE_URL: unsubscribeUrl(u.rows[0].id),
+      });
+      sendMail(email, 'Осталось одно дело — и можно начинать', mail.text, mail.html).then(
         () => console.log('welcome mail: sent to', email),
         e => console.error('welcome mail:', e.message)
       );
@@ -275,6 +240,19 @@ router.get('/verify-email', ah(async (req, res) => {
   }
   if (redirectOk) return res.redirect(302, frontendUrl);
   res.send('Email подтверждён! Можно закрыть эту страницу и вернуться в приложение.');
+}));
+
+// Отписка от онбординг-рассылки (письма 2-4, см. lib/emails/) — ссылка из
+// письма, обычная браузерная навигация. Токен не одноразовый и не истекает
+// (см. lib/mail.js), поэтому не нужно ничего искать/чистить в БД для проверки.
+router.get('/unsubscribe', ah(async (req, res) => {
+  const uid = String(req.query.uid || '');
+  const token = String(req.query.token || '');
+  if (!uid || !verifyUnsubscribeToken(uid, token)) {
+    return res.status(400).send('Ссылка недействительна.');
+  }
+  await db.query('UPDATE users SET unsubscribed_at=now() WHERE id=$1', [uid]);
+  res.send('Вы отписаны от рассылки «Семейный поток». Письма о вашем аккаунте (подтверждение почты, сброс пароля, оплата) продолжат приходить.');
 }));
 
 // ── Вход через Яндекс ID ─────────────────────────────────────────────────

@@ -1,4 +1,5 @@
 const { request, db, resetDb, registerUser, uniqueEmail } = require('./helpers');
+const { unsubscribeToken } = require('../lib/mail');
 
 beforeEach(resetDb);
 afterAll(async () => { await db.end(); });
@@ -264,5 +265,34 @@ describe('POST /auth/delete-account', () => {
     const members = await db.query('SELECT user_id, role FROM family_members WHERE family_id=$1', [owner.familyId]);
     expect(members.rows).toHaveLength(1);
     expect(members.rows[0].role).toBe('owner');
+  });
+});
+
+describe('GET /auth/unsubscribe', () => {
+  test('верный токен — помечает unsubscribed_at', async () => {
+    const u = await registerUser();
+    const uid = (await db.query('SELECT id FROM users WHERE email=lower($1)', [u.email])).rows[0].id;
+    const res = await request.get(`/auth/unsubscribe?uid=${uid}&token=${unsubscribeToken(uid)}`);
+    expect(res.status).toBe(200);
+    const row = await db.query('SELECT unsubscribed_at FROM users WHERE id=$1', [uid]);
+    expect(row.rows[0].unsubscribed_at).not.toBeNull();
+  });
+
+  test('неверный токен — 400, отметка не ставится', async () => {
+    const u = await registerUser();
+    const uid = (await db.query('SELECT id FROM users WHERE email=lower($1)', [u.email])).rows[0].id;
+    const res = await request.get(`/auth/unsubscribe?uid=${uid}&token=not-the-right-token`);
+    expect(res.status).toBe(400);
+    const row = await db.query('SELECT unsubscribed_at FROM users WHERE id=$1', [uid]);
+    expect(row.rows[0].unsubscribed_at).toBeNull();
+  });
+
+  test('чужой токен к чужому uid не подходит', async () => {
+    const a = await registerUser();
+    const b = await registerUser();
+    const uidA = (await db.query('SELECT id FROM users WHERE email=lower($1)', [a.email])).rows[0].id;
+    const uidB = (await db.query('SELECT id FROM users WHERE email=lower($1)', [b.email])).rows[0].id;
+    const res = await request.get(`/auth/unsubscribe?uid=${uidB}&token=${unsubscribeToken(uidA)}`);
+    expect(res.status).toBe(400);
   });
 });

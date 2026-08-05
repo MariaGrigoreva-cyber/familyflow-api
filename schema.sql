@@ -166,3 +166,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS users_email_active_idx ON users(email) WHERE d
 ALTER TABLE family_states ADD COLUMN IF NOT EXISTS reset_backup jsonb;
 ALTER TABLE family_states ADD COLUMN IF NOT EXISTS reset_backup_enc bytea;
 ALTER TABLE family_states ADD COLUMN IF NOT EXISTS reset_at timestamptz;
+
+-- ── Отписка от онбординг-рассылки ────────────────────────────────────────
+-- Ссылка «Отписаться» в письмах 2-4 (см. lib/emails/) — GET /auth/unsubscribe
+-- помечает этой отметкой, lib/onboardingScheduler.js больше не шлёт таким
+-- пользователям. Welcome-письмо (оно же подтверждение email) отправляется
+-- независимо от этой отметки — это не рассылка, а часть регистрации.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS unsubscribed_at timestamptz;
