@@ -7,7 +7,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('../db');
 const ah = require('../middleware/asyncHandler');
 const authMw = require('../middleware/auth');
-const { sendMail, mailConfigured, renderTemplate, unsubscribeUrl, verifyUnsubscribeToken } = require('../lib/mail');
+const { sendMail, mailConfigured, renderTemplate, unsubscribeUrl, verifyUnsubscribeToken, hasMxRecord } = require('../lib/mail');
 const validate = require('../middleware/validate');
 const { registerSchema, loginSchema, changePasswordSchema, resetRequestSchema, resetConfirmSchema } = require('../lib/schemas');
 
@@ -31,6 +31,10 @@ const strictLimiter = rateLimit({
 
 router.post('/register', validate(registerSchema), ah(async (req, res) => {
   const { email, password, familyName, pdnConsent } = req.body || {};
+  // Опечатка в домене (gmial.com, yandex.ry) — самый частый случай, который
+  // Unisender ниже не ловит (см. lib/mail.js). Проверяем ДО подключения к БД —
+  // ни аккаунт, ни семья ещё не созданы.
+  if (!(await hasMxRecord(email))) return res.status(400).json({ error: 'bad_email' });
   const client = await db.connect();
   try {
     await client.query('BEGIN');

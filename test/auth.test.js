@@ -1,3 +1,4 @@
+const dns = require('dns');
 const { request, db, resetDb, registerUser, uniqueEmail } = require('./helpers');
 const { unsubscribeToken } = require('../lib/mail');
 
@@ -5,6 +6,32 @@ beforeEach(resetDb);
 afterAll(async () => { await db.end(); });
 
 describe('POST /auth/register', () => {
+  test('домен без MX-записи (опечатка типа gmial.com) — 400 bad_email, аккаунт не создаётся', async () => {
+    const spy = jest.spyOn(dns, 'resolveMx').mockImplementation((domain, cb) => {
+      const e = new Error('queryMx ENOTFOUND ' + domain);
+      e.code = 'ENOTFOUND';
+      cb(e);
+    });
+    const email = uniqueEmail();
+    const res = await request.post('/auth/register').send({ email, password: 'password123', pdnConsent: true });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('bad_email');
+    const u = await db.query('SELECT 1 FROM users WHERE email=lower($1)', [email]);
+    expect(u.rows).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  test('сбой DNS-резолвера (не ENOTFOUND/ENODATA) не блокирует регистрацию', async () => {
+    const spy = jest.spyOn(dns, 'resolveMx').mockImplementation((domain, cb) => {
+      const e = new Error('queryMx ETIMEOUT ' + domain);
+      e.code = 'ETIMEOUT';
+      cb(e);
+    });
+    const res = await request.post('/auth/register').send({ email: uniqueEmail(), password: 'password123', pdnConsent: true });
+    expect(res.status).toBe(200);
+    spy.mockRestore();
+  });
+
   test('создаёт пользователя, его семью и пустой state', async () => {
     const email = uniqueEmail();
     const res = await request.post('/auth/register').send({ email, password: 'password123', pdnConsent: true });
