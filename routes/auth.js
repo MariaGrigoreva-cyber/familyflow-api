@@ -58,19 +58,34 @@ router.post('/register', validate(registerSchema), ah(async (req, res) => {
       `UPDATE users SET verify_token=$1, verify_expires=now() + interval '24 hours' WHERE id=$2`,
       [verifyToken, u.rows[0].id]
     );
-    await client.query('COMMIT');
 
+    // Письмо шлём ДО коммита: Unisender синхронно, в том же ответе, сообщает
+    // про невалидный адрес (failed_emails: "invalid" — опечатка типа gmial.com)
+    // — успеваем откатить создание аккаунта, а не молча потерять человека,
+    // который никогда не увидит письмо и не поймёт почему.
+    let mailSent = false;
     if (mailConfigured()) {
       const verifyLink = `${req.protocol}://${req.get('host')}/auth/verify-email?token=${verifyToken}`;
       const mail = renderTemplate('1-welcome', {
         VERIFY_URL: verifyLink,
         UNSUBSCRIBE_URL: unsubscribeUrl(u.rows[0].id),
       });
-      sendMail(email, 'Осталось одно дело — и можно начинать', mail.text, mail.html).then(
-        () => console.log('welcome mail: sent to', email),
-        e => console.error('welcome mail:', e.message)
-      );
+      try {
+        await sendMail(email, 'Осталось одно дело — и можно начинать', mail.text, mail.html);
+        mailSent = true;
+      } catch (e) {
+        if (e.rejectedReason === 'invalid') {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'bad_email' });
+        }
+        // Другие причины (временная недоступность почтового сервера, дубликат
+        // и т.п.) не должны блокировать регистрацию — логируем и продолжаем.
+        console.error('welcome mail:', e.message);
+      }
     }
+
+    await client.query('COMMIT');
+    if (mailSent) console.log('welcome mail: sent to', email);
 
     res.json({ token: sign(u.rows[0].id, 1), familyId: f.rows[0].id, emailVerified: false });
   } catch (e) {
