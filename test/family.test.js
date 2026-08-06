@@ -23,6 +23,7 @@ describe('GET /family/me', () => {
     expect(res.status).toBe(200);
     expect(res.body.members).toBe(1);
     expect(res.body.role).toBe('owner');
+    expect(res.body.email).toBe(u.email.toLowerCase());
   });
 });
 

@@ -18,9 +18,9 @@ const FREE_MEMBER_LIMIT = 1;
 
 router.get('/me', auth, ah(async (req, res) => {
   const r = await db.query(
-    `SELECT f.id, f.name, f.invite_code, m.role,
+    `SELECT f.id, f.name, f.invite_code, m.role, u.email,
             (SELECT count(*) FROM family_members WHERE family_id=f.id)::int AS members
-       FROM family_members m JOIN families f ON f.id=m.family_id
+       FROM family_members m JOIN families f ON f.id=m.family_id JOIN users u ON u.id=m.user_id
       WHERE m.user_id=$1`, [req.user.uid]);
   if (!r.rows.length) return res.status(404).json({ error: 'no_family' });
   res.json(r.rows[0]);
