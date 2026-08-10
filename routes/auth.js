@@ -15,6 +15,21 @@ const { registerSchema, loginSchema, changePasswordSchema, resetRequestSchema, r
 // версию в БД и тем самым отзывает все ранее выданные токены.
 const sign = (uid, tv) => jwt.sign({ uid, tv }, process.env.JWT_SECRET, { expiresIn: '90d' });
 
+// Атрибуция клика по рекламе, присланная фронтендом (см. familyflow-web/src/lib/metrika.js
+// и familyflow-landing/public/script.js) — тело запроса не проверено, поэтому
+// пишем в БД только заведомо известные поля, а не объект как есть.
+const ATTRIBUTION_KEYS = ['yclid', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
+function sanitizeAttribution(attribution) {
+  if (!attribution || typeof attribution !== 'object') return null;
+  const out = {};
+  for (const key of ATTRIBUTION_KEYS) {
+    const v = attribution[key];
+    if (typeof v === 'string' && v) out[key] = v.slice(0, 200);
+  }
+  if (typeof attribution.ts === 'number') out.ts = attribution.ts;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 // Строже общего лимита на /auth — это конкретно подбор пароля и подбор
 // 6-значного кода сброса, самые ценные цели для брутфорса.
 const strictLimiter = rateLimit({
@@ -30,7 +45,7 @@ const strictLimiter = rateLimit({
 });
 
 router.post('/register', validate(registerSchema), ah(async (req, res) => {
-  const { email, password, familyName, pdnConsent } = req.body || {};
+  const { email, password, familyName, pdnConsent, attribution } = req.body || {};
   // Опечатка в домене (gmial.com, yandex.ry) — самый частый случай, который
   // Unisender ниже не ловит (см. lib/mail.js). Проверяем ДО подключения к БД —
   // ни аккаунт, ни семья ещё не созданы.
@@ -40,8 +55,8 @@ router.post('/register', validate(registerSchema), ah(async (req, res) => {
     await client.query('BEGIN');
     const hash = await bcrypt.hash(password, 10);
     const u = await client.query(
-      'INSERT INTO users(email, pass_hash, pdn_consent_at, pdn_consent_ip) VALUES(lower($1), $2, now(), $3) RETURNING id',
-      [email, hash, req.ip]
+      'INSERT INTO users(email, pass_hash, pdn_consent_at, pdn_consent_ip, attribution) VALUES(lower($1), $2, now(), $3, $4) RETURNING id',
+      [email, hash, req.ip, sanitizeAttribution(attribution)]
     );
     const f = await client.query(
       `INSERT INTO families(name, trial_ends_at) VALUES($1, now() + interval '30 days') RETURNING id`,

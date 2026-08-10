@@ -167,6 +167,14 @@ ALTER TABLE family_states ADD COLUMN IF NOT EXISTS reset_backup jsonb;
 ALTER TABLE family_states ADD COLUMN IF NOT EXISTS reset_backup_enc bytea;
 ALTER TABLE family_states ADD COLUMN IF NOT EXISTS reset_at timestamptz;
 
+-- ── Атрибуция регистрации (реклама) ─────────────────────────────────────────
+-- yclid/utm_* клика по объявлению, с которого пришёл пользователь — лендинг
+-- кладёт их в cookie ff_attr на .myfamilyflow.ru (familyflow-web/src/lib/metrika.js
+-- читает её и шлёт сюда при POST /auth/register). Без этого нельзя сопоставить
+-- регистрацию с конкретной кампанией/фразой в Яндекс.Директе — ни выгрузить
+-- офлайн-конверсии по yclid, ни посчитать конверсию по utm_campaign вручную.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS attribution jsonb;
+
 -- ── Отписка от онбординг-рассылки ────────────────────────────────────────
 -- Ссылка «Отписаться» в письмах 2-4 (см. lib/emails/) — GET /auth/unsubscribe
 -- помечает этой отметкой, lib/onboardingScheduler.js больше не шлёт таким
