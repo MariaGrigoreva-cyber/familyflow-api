@@ -49,7 +49,10 @@ router.post('/register', validate(registerSchema), ah(async (req, res) => {
   // Опечатка в домене (gmial.com, yandex.ry) — самый частый случай, который
   // Unisender ниже не ловит (см. lib/mail.js). Проверяем ДО подключения к БД —
   // ни аккаунт, ни семья ещё не созданы.
-  if (!(await hasMxRecord(email))) return res.status(400).json({ error: 'bad_email' });
+  if (!(await hasMxRecord(email))) {
+    console.error('register bad_email: no MX record for', email);
+    return res.status(400).json({ error: 'bad_email' });
+  }
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -94,6 +97,7 @@ router.post('/register', validate(registerSchema), ah(async (req, res) => {
         mailSent = true;
       } catch (e) {
         if (e.rejectedReason === 'invalid') {
+          console.error('register bad_email: Unisender rejected as invalid', email);
           await client.query('ROLLBACK');
           return res.status(400).json({ error: 'bad_email' });
         }
