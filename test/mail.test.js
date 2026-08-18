@@ -23,4 +23,25 @@ describe('sendMail / Unisender failed_emails', () => {
     });
     await expect(sendMail('ok@example.com', 'subj', 'text', '<p>html</p>')).resolves.toBeUndefined();
   });
+
+  test('unsubscribeUrl передан — в теле запроса к Unisender есть заголовок List-Unsubscribe', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'success' }),
+    });
+    const url = 'https://myfamilyflow.ru/auth/unsubscribe?uid=1&token=abc';
+    await sendMail('ok@example.com', 'subj', 'text', '<p>html</p>', url);
+    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(body.message.headers).toEqual({ 'List-Unsubscribe': `<${url}>` });
+  });
+
+  test('unsubscribeUrl не передан — заголовков в теле запроса нет', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'success' }),
+    });
+    await sendMail('ok@example.com', 'subj', 'text', '<p>html</p>');
+    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(body.message.headers).toBeUndefined();
+  });
 });

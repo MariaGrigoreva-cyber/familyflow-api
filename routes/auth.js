@@ -88,12 +88,13 @@ router.post('/register', validate(registerSchema), ah(async (req, res) => {
     let mailSent = false;
     if (mailConfigured()) {
       const verifyLink = `${req.protocol}://${req.get('host')}/auth/verify-email?token=${verifyToken}`;
+      const unsubUrl = unsubscribeUrl(u.rows[0].id);
       const mail = renderTemplate('1-welcome', {
         VERIFY_URL: verifyLink,
-        UNSUBSCRIBE_URL: unsubscribeUrl(u.rows[0].id),
+        UNSUBSCRIBE_URL: unsubUrl,
       });
       try {
-        await sendMail(email, 'Осталось одно дело — и можно начинать', mail.text, mail.html);
+        await sendMail(email, 'Осталось одно дело — и можно начинать', mail.text, mail.html, unsubUrl);
         mailSent = true;
       } catch (e) {
         if (e.rejectedReason === 'invalid') {
