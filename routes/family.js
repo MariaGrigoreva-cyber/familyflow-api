@@ -18,12 +18,17 @@ const FREE_MEMBER_LIMIT = 1;
 
 router.get('/me', auth, ah(async (req, res) => {
   const r = await db.query(
-    `SELECT f.id, f.name, f.invite_code, m.role, u.email,
+    `SELECT f.id, f.name, f.invite_code, m.role, u.email, u.created_at AS user_created_at, u.feedback_status,
             (SELECT count(*) FROM family_members WHERE family_id=f.id)::int AS members
        FROM family_members m JOIN families f ON f.id=m.family_id JOIN users u ON u.id=m.user_id
       WHERE m.user_id=$1`, [req.user.uid]);
   if (!r.rows.length) return res.status(404).json({ error: 'no_family' });
-  res.json(r.rows[0]);
+  const { id, name, invite_code, role, email, user_created_at, feedback_status, members } = r.rows[0];
+  // Попап обратной связи: 14+ дней с регистрации и пользователь ещё не ответил
+  // (не оставил отзыв и не отказался) — см. routes/feedback.js и schema.sql.
+  const daysSinceRegistration = (Date.now() - new Date(user_created_at).getTime()) / 86400000;
+  const showFeedbackPrompt = feedback_status === 'pending' && daysSinceRegistration >= 14;
+  res.json({ id, name, invite_code, role, email, members, showFeedbackPrompt });
 }));
 
 router.post('/invite', auth, ah(async (req, res) => {

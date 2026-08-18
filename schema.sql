@@ -181,3 +181,20 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS attribution jsonb;
 -- пользователям. Welcome-письмо (оно же подтверждение email) отправляется
 -- независимо от этой отметки — это не рассылка, а часть регистрации.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS unsubscribed_at timestamptz;
+
+-- ── Попап сбора обратной связи ───────────────────────────────────────────
+-- Фронт показывает попап пользователям, зарегистрированным 14+ дней назад
+-- (флаг showFeedbackPrompt в GET /family/me, см. routes/family.js), пока
+-- статус остаётся 'pending'. «Оставить позже» ничего не пишет в БД — попап
+-- просто вернётся при следующем заходе. «Оставить сейчас»/«не хочу» переводят
+-- статус в 'submitted'/'declined' насовсем — эти пользователи больше не
+-- видят попап.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS feedback_status text NOT NULL DEFAULT 'pending'; -- pending | submitted | declined
+ALTER TABLE users ADD COLUMN IF NOT EXISTS feedback_responded_at timestamptz;
+
+CREATE TABLE IF NOT EXISTS user_feedback (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  text        text NOT NULL,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
