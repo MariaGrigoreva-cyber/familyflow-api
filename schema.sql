@@ -214,3 +214,11 @@ CREATE TABLE IF NOT EXISTS user_activity_events (
 );
 CREATE INDEX IF NOT EXISTS idx_user_activity_events_family_created
   ON user_activity_events(family_id, created_at);
+
+-- ── Способ регистрации ───────────────────────────────────────────────────
+-- И обычная регистрация, и вход через Яндекс ID (routes/auth.js) пишут в
+-- users.pass_hash (при Яндексе — неиспользуемый случайный хеш, см. коммент
+-- там), поэтому по одному pass_hash отличить способ входа нельзя. DEFAULT
+-- 'email' — то, что было верно для всех строк ДО этой колонки; настоящих
+-- пользователей Яндекса среди них задним числом уже не различить.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider text NOT NULL DEFAULT 'email';
