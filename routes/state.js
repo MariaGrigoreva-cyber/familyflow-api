@@ -72,6 +72,11 @@ router.put('/', auth, validate(stateSchema), ah(async (req, res) => {
      ON CONFLICT (family_id) DO UPDATE SET data=$2, data_enc=$3, updated_at=now(), updated_by=$4
      RETURNING updated_at`,
     [fid, plainVal, encBuf, req.user.uid]);
+
+  await db.query(
+    `INSERT INTO user_activity_events(user_id, family_id, event_type) VALUES($1, $2, 'budget_saved')`,
+    [req.user.uid, fid]);
+
   res.json({ ok: true, updatedAt: r.rows[0].updated_at });
 }));
 

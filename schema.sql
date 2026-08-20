@@ -198,3 +198,19 @@ CREATE TABLE IF NOT EXISTS user_feedback (
   text        text NOT NULL,
   created_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- ── Лог активности ───────────────────────────────────────────────────────
+-- family_states хранит только текущее состояние бюджета (UPDATE перезаписывает
+-- строку), поэтому по нему нельзя посчитать регулярность использования —
+-- видно только момент последнего сохранения. Эта таблица — append-only лог:
+-- каждое сохранение добавляет новую строку, не трогая предыдущие, что и даёт
+-- метрику "активных дней" (см. routes/state.js).
+CREATE TABLE IF NOT EXISTS user_activity_events (
+  id          bigserial PRIMARY KEY,
+  user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  family_id   uuid REFERENCES families(id) ON DELETE CASCADE,
+  event_type  text NOT NULL, -- budget_saved | ...
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_user_activity_events_family_created
+  ON user_activity_events(family_id, created_at);
