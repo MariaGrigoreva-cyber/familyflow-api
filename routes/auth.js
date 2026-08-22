@@ -362,8 +362,8 @@ router.get('/yandex/callback', ah(async (req, res) => {
       const unusablePass = crypto.randomBytes(32).toString('hex');
       const hash = await bcrypt.hash(unusablePass, 10);
       const u = await client.query(
-        `INSERT INTO users(email, pass_hash, email_verified_at, pdn_consent_at, pdn_consent_ip)
-         VALUES($1, $2, now(), now(), $3) RETURNING id, token_version`,
+        `INSERT INTO users(email, pass_hash, email_verified_at, pdn_consent_at, pdn_consent_ip, auth_provider)
+         VALUES($1, $2, now(), now(), $3, 'yandex') RETURNING id, token_version`,
         [email, hash, req.ip]
       );
       ({ id: userId, token_version: tokenVersion } = u.rows[0]);
