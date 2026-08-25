@@ -51,6 +51,7 @@ app.use('/family', require('./routes/family'));
 app.use('/billing', require('./routes/billing'));
 app.use('/push', require('./routes/push'));
 app.use('/feedback', require('./routes/feedback'));
+app.use('/ai', require('./routes/ai'));
 app.use('/admin', require('./routes/admin'));
 
 // Ловит необработанные ошибки из роутов и шлёт в GlitchTip (если DSN настроен),
