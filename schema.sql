@@ -222,3 +222,42 @@ CREATE INDEX IF NOT EXISTS idx_user_activity_events_family_created
 -- 'email' — то, что было верно для всех строк ДО этой колонки; настоящих
 -- пользователей Яндекса среди них задним числом уже не различить.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider text NOT NULL DEFAULT 'email';
+
+-- ── AI-помощник: техническая статистика и оценки (этап 6) ────────────────
+-- ЭТО НЕ АРХИВ ПЕРЕПИСКИ. Сама история диалога живёт только на устройстве
+-- (localStorage ff_ai_chat_history) — здесь НЕТ ни вопроса, ни ответа, ни
+-- финансовых сумм. Таблица нужна для трёх вещей: связать оценку с конкретным
+-- ответом (id), понять качество по экранам/типам запросов и удержать дневной
+-- лимит запросов на пользователя.
+CREATE TABLE IF NOT EXISTS ai_requests (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  -- Код экрана из закрытого списка (today|plan|budget|health|settings|...)
+  screen          text,
+  -- Был ли передан обезличенный финансовый снимок и какой детерминированный
+  -- вывод применился: spending_check | period_check | none.
+  had_context     boolean NOT NULL DEFAULT false,
+  decision_type   text NOT NULL DEFAULT 'none',
+  -- success | validation_error | not_configured | provider_error | timeout
+  -- | disabled | rate_limited
+  status          text NOT NULL,
+  latency_ms      integer,
+  -- Версия связки промпт+база знаний, чтобы понимать, на чём получен отзыв.
+  prompt_version  text
+);
+CREATE INDEX IF NOT EXISTS idx_ai_requests_user_created
+  ON ai_requests(user_id, created_at);
+
+-- Оценка конкретного ответа. UNIQUE по request_id: повторные клики обновляют
+-- существующую оценку, а не плодят строки.
+CREATE TABLE IF NOT EXISTS ai_feedback (
+  request_id  uuid PRIMARY KEY REFERENCES ai_requests(id) ON DELETE CASCADE,
+  user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  rating      text NOT NULL CHECK (rating IN ('up', 'down')),
+  -- Необязательный комментарий пользователя. Единственное место, где может
+  -- появиться свободный текст, и пишет его сам пользователь осознанно.
+  comment     text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
