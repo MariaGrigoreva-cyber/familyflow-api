@@ -185,17 +185,25 @@ router.post('/support-ask', auth, validateAiSupport, ah(async (req, res) => {
 // комментарий — ни вопроса, ни ответа, ни финансовых данных здесь нет.
 router.post('/feedback', auth, validate(aiFeedbackSchema), ah(async (req, res) => {
   const { requestId, rating, comment } = req.body;
+  // Текст ответа храним ТОЛЬКО при отрицательной оценке: без него 👎 без
+  // комментария нечем разбирать. При 👍 (в том числе когда пользователь
+  // передумал и переставил оценку) поле обнуляется — держать текст дольше,
+  // чем он нужен для разбора жалобы, незачем.
+  const answerExcerpt = rating === 'down' && typeof req.body.answer === 'string' && req.body.answer.trim()
+    ? req.body.answer.trim()
+    : null;
   // Оценить можно только свой ответ: строка ищется по паре id+user_id.
   const own = await db.query('SELECT 1 FROM ai_requests WHERE id=$1 AND user_id=$2', [requestId, req.user.uid]);
   if (!own.rows.length) return res.status(404).json({ error: 'not_found' });
 
   // Повторный клик обновляет оценку, а не плодит строки.
   await db.query(
-    `INSERT INTO ai_feedback(request_id, user_id, rating, comment)
-     VALUES($1,$2,$3,$4)
+    `INSERT INTO ai_feedback(request_id, user_id, rating, comment, answer_excerpt)
+     VALUES($1,$2,$3,$4,$5)
      ON CONFLICT (request_id) DO UPDATE
-       SET rating = EXCLUDED.rating, comment = EXCLUDED.comment, updated_at = now()`,
-    [requestId, req.user.uid, rating, comment || null],
+       SET rating = EXCLUDED.rating, comment = EXCLUDED.comment,
+           answer_excerpt = EXCLUDED.answer_excerpt, updated_at = now()`,
+    [requestId, req.user.uid, rating, comment || null, answerExcerpt],
   );
   res.json({ ok: true });
 }));

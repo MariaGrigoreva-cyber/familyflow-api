@@ -1012,6 +1012,60 @@ describe('requestId и оценка ответа', () => {
     expect((await feedback(u, { requestId: 'не-uuid', rating: 'up' })).status).toBe(400);
     expect((await feedback(u, { requestId: '11111111-2222-3333-4444-555555555555', rating: 'ok' })).status).toBe(400);
   });
+
+  // Текст ответа — единственные пользовательские данные, которые мы вообще
+  // храним по помощнику, поэтому границы проверяем отдельно и явно.
+  const excerptOf = async id => (await db.query(
+    'SELECT answer_excerpt FROM ai_feedback WHERE request_id=$1', [id])).rows[0]?.answer_excerpt;
+
+  test('текст ответа сохраняется при 👎', async () => {
+    const { u, res } = await askOk();
+    const answer = 'Свободный остаток 10 720 рублей.';
+    expect((await feedback(u, { requestId: res.body.requestId, rating: 'down', answer })).status).toBe(200);
+    expect(await excerptOf(res.body.requestId)).toBe(answer);
+  });
+
+  test('при 👍 текст ответа не сохраняется, даже если его прислали', async () => {
+    const { u, res } = await askOk();
+    expect((await feedback(u, {
+      requestId: res.body.requestId, rating: 'up', answer: 'Свободный остаток 10 720 рублей.',
+    })).status).toBe(200);
+    expect(await excerptOf(res.body.requestId)).toBeNull();
+  });
+
+  test('смена 👎 на 👍 стирает сохранённый текст', async () => {
+    const { u, res } = await askOk();
+    const id = res.body.requestId;
+    await feedback(u, { requestId: id, rating: 'down', answer: 'плохой ответ' });
+    expect(await excerptOf(id)).toBe('плохой ответ');
+    expect((await feedback(u, { requestId: id, rating: 'up' })).status).toBe(200);
+    expect(await excerptOf(id)).toBeNull();
+  });
+
+  test('👎 без текста ответа сохраняется как раньше', async () => {
+    const { u, res } = await askOk();
+    expect((await feedback(u, { requestId: res.body.requestId, rating: 'down' })).status).toBe(200);
+    expect(await excerptOf(res.body.requestId)).toBeNull();
+  });
+
+  test('нестроковый и слишком длинный текст ответа отклоняются', async () => {
+    const { u, res } = await askOk();
+    const id = res.body.requestId;
+    expect((await feedback(u, { requestId: id, rating: 'down', answer: { a: 1 } })).status).toBe(400);
+    expect((await feedback(u, { requestId: id, rating: 'down', answer: 'я'.repeat(4001) })).status).toBe(400);
+    // Отклонённый запрос не должен оставлять строку оценки.
+    const rows = await db.query('SELECT 1 FROM ai_feedback WHERE request_id=$1', [id]);
+    expect(rows.rows).toHaveLength(0);
+  });
+
+  test('текст ответа нельзя записать в чужой requestId', async () => {
+    const { res } = await askOk();
+    const other = await registerUser();
+    expect((await feedback(other, {
+      requestId: res.body.requestId, rating: 'down', answer: 'подсунутый текст',
+    })).status).toBe(404);
+    expect(await excerptOf(res.body.requestId)).toBeUndefined();
+  });
 });
 
 describe('Телеметрия — только технические поля', () => {
