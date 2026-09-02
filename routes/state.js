@@ -16,6 +16,20 @@ const familyOf = async uid => {
   return r.rows[0]?.family_id || null;
 };
 
+// ── Временное профилирование GET /state ──────────────────────────────────────
+// Включается переменной окружения STATE_TIMING=1 (по умолчанию выключено, в лог
+// ничего лишнего не течёт). Разбивка нужна, чтобы отличить медленную БД от
+// медленной расшифровки/сериализации большого снапшота бюджета.
+//   GET /state: auth: X ms | db: X ms | serialization: X ms | total: X ms
+// auth  — JWT + проверка token_version в middleware/auth.js (одна выборка из users);
+// db    — выборка состояния семьи ВМЕСТЕ с расшифровкой data_enc (AES-GCM);
+// serialization — JSON.stringify итогового ответа.
+const STATE_TIMING = process.env.STATE_TIMING === '1';
+const now = () => process.hrtime.bigint();
+const msSince = from => Number(now() - from) / 1e6;
+// Ставим метку ДО auth — иначе время самого auth измерить нечем.
+const timing = (req, _res, next) => { if (STATE_TIMING) req._tStart = now(); next(); };
+
 // Держим в синхроне с lib/stateResetPurgeScheduler.js — там та же переменная
 // окружения определяет, когда бэкап сброса стирается по-настоящему.
 const RESET_GRACE_DAYS = Number(process.env.STATE_RESET_GRACE_DAYS || 90);
@@ -31,19 +45,42 @@ const readData = row => {
   return row.data || {};
 };
 
-router.get('/', auth, ah(async (req, res) => {
-  const fid = await familyOf(req.user.uid);
-  if (!fid) return res.status(404).json({ error: 'no_family' });
+// Раньше здесь было два последовательных запроса к БД: сначала familyOf() за
+// family_id, потом выборка family_states по нему. Второй ждал первого впустую —
+// это один и тот же путь по индексам, склеенный JOIN'ом в один round-trip.
+// LEFT JOIN обязателен: семья без строки в family_states — нормальная ситуация
+// (пустой бюджет), и она по-прежнему должна отдавать data:{}, а не 404.
+router.get('/', timing, auth, ah(async (req, res) => {
+  const tAuth = STATE_TIMING ? msSince(req._tStart) : 0;
+  const tDb0 = STATE_TIMING ? now() : null;
+
   const r = await db.query(
-    'SELECT data, data_enc, updated_at, reset_at FROM family_states WHERE family_id=$1', [fid]);
+    `SELECT fm.family_id, fs.data, fs.data_enc, fs.updated_at, fs.reset_at
+       FROM family_members fm
+       LEFT JOIN family_states fs ON fs.family_id = fm.family_id
+      WHERE fm.user_id = $1`, [req.user.uid]);
   const row = r.rows[0];
+  if (!row) return res.status(404).json({ error: 'no_family' });
+
   let data;
   try { data = readData(row); }
   catch (e) { return res.status(e.status || 500).json({ error: e.message }); }
-  const resetBackup = row?.reset_at
+  const dbMs = STATE_TIMING ? msSince(tDb0) : 0;
+
+  const resetBackup = row.reset_at
     ? { resetAt: row.reset_at, expiresAt: new Date(row.reset_at.getTime() + RESET_GRACE_DAYS * 86400000) }
     : null;
-  res.json({ familyId: fid, data, updatedAt: row?.updated_at || null, resetBackup });
+  const body = { familyId: row.family_id, data, updatedAt: row.updated_at || null, resetBackup };
+
+  if (!STATE_TIMING) return res.json(body);
+
+  const tSer0 = now();
+  const json = JSON.stringify(body);
+  const serMs = msSince(tSer0);
+  res.type('json').send(json);
+  console.log(
+    `GET /state: auth: ${tAuth.toFixed(1)} ms | db: ${dbMs.toFixed(1)} ms | ` +
+    `serialization: ${serMs.toFixed(1)} ms | total: ${msSince(req._tStart).toFixed(1)} ms | bytes: ${json.length}`);
 }));
 
 router.put('/', auth, validate(stateSchema), ah(async (req, res) => {
