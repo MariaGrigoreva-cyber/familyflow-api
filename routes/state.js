@@ -6,15 +6,11 @@
 const router = require('express').Router();
 const db = require('../db');
 const auth = require('../middleware/auth');
+const requireCapability = require('../middleware/requireCapability');
 const ah = require('../middleware/asyncHandler');
 const { encryptJSON, decryptJSON, configured } = require('../lib/crypto');
 const validate = require('../middleware/validate');
 const { stateSchema } = require('../lib/schemas');
-
-const familyOf = async uid => {
-  const r = await db.query('SELECT family_id FROM family_members WHERE user_id=$1', [uid]);
-  return r.rows[0]?.family_id || null;
-};
 
 // ── Временное профилирование GET /state ──────────────────────────────────────
 // Включается переменной окружения STATE_TIMING=1 (по умолчанию выключено, в лог
@@ -50,6 +46,11 @@ const readData = row => {
 // это один и тот же путь по индексам, склеенный JOIN'ом в один round-trip.
 // LEFT JOIN обязателен: семья без строки в family_states — нормальная ситуация
 // (пустой бюджет), и она по-прежнему должна отдавать data:{}, а не 404.
+//
+// ЧТЕНИЕ НЕ ЗАКРЫВАЕТСЯ ничем: снапшот бюджета входит в бесплатный тариф
+// (capability basicBudget), и человек обязан видеть свой бюджет и иметь
+// возможность выгрузить его в Excel (familyflow-web/src/lib/excelBackup.js
+// читает состояние именно отсюда).
 router.get('/', timing, auth, ah(async (req, res) => {
   const tAuth = STATE_TIMING ? msSince(req._tStart) : 0;
   const tDb0 = STATE_TIMING ? now() : null;
@@ -83,11 +84,23 @@ router.get('/', timing, auth, ah(async (req, res) => {
     `serialization: ${serMs.toFixed(1)} ms | total: ${msSince(req._tStart).toFixed(1)} ms | bytes: ${json.length}`);
 }));
 
-router.put('/', auth, validate(stateSchema), ah(async (req, res) => {
+// Запись бюджета — БЕСПЛАТНАЯ возможность (capability basicBudget).
+//
+// Так было не всегда: до пересборки тарифов этот роут закрывался шлюзом и
+// после окончания триала отдавал 402. Free при этом превращался в режим
+// «только чтение» — человек не мог даже отметить оплаченный счёт, то есть
+// бесплатный тариф был не урезанным, а сломанным. Ценность Pro теперь несут
+// прогноз, предупреждения о кассовых разрывах, проверка покупок и AI
+// (см. lib/capabilities.js), а не запрет вести собственный бюджет.
+//
+// Шлюз всё равно стоит: он загружает entitlement (в req.entitlement приходит
+// familyId, поэтому отдельный запрос familyOf() здесь не нужен) и остаётся
+// единственным местом, где решается доступ — если состав тарифов однажды
+// изменится, менять придётся только реестр возможностей.
+router.put('/', auth, requireCapability('basicBudget'), validate(stateSchema), ah(async (req, res) => {
   const { data, baseUpdatedAt } = req.body || {};
   if (JSON.stringify(data).length > 2_000_000) return res.status(413).json({ error: 'too_large' });
-  const fid = await familyOf(req.user.uid);
-  if (!fid) return res.status(404).json({ error: 'no_family' });
+  const fid = req.entitlement.familyId;
 
   const cur = await db.query('SELECT updated_at FROM family_states WHERE family_id=$1', [fid]);
   const serverAt = cur.rows[0]?.updated_at?.toISOString?.() || null;
@@ -122,9 +135,11 @@ router.put('/', auth, validate(stateSchema), ah(async (req, res) => {
 // времени, и только потом обнуляем рабочие data/data_enc. Все SET-выражения в
 // одном UPDATE читают значения ДО изменения, так что бэкап атомарно захватывает
 // именно то, что стирается этим же запросом.
-router.post('/reset', auth, ah(async (req, res) => {
-  const fid = await familyOf(req.user.uid);
-  if (!fid) return res.status(404).json({ error: 'no_family' });
+// Сброс — часть базового ведения бюджета (basicBudget), а не платная функция:
+// человек вправе стереть собственные данные на любом тарифе. Шлюз здесь ради
+// единой точки загрузки entitlement (familyId в req.entitlement).
+router.post('/reset', auth, requireCapability('basicBudget'), ah(async (req, res) => {
+  const fid = req.entitlement.familyId;
 
   const r = await db.query(
     `UPDATE family_states
@@ -145,13 +160,27 @@ router.post('/reset', auth, ah(async (req, res) => {
   res.json({ ok: true, updatedAt: r.rows[0].updated_at });
 }));
 
-// Возврат данных из окна отложенного удаления (см. п. выше и
-// lib/stateResetPurgeScheduler.js). COALESCE на data обязателен: колонка NOT NULL,
+// Возврат данных из окна отложенного удаления — восстановление собственных
+// данных пользователя, а не платная возможность: доступно на любом тарифе,
+// как и сама запись бюджета (basicBudget в lib/capabilities.js).
+//
+// Шлюз здесь стоит осознанно, хотя ничего не запрещает. Это ЗАПИСЬ в
+// family_states, и такая запись обязана проходить через тот же реестр
+// возможностей, что и PUT /state: если состав тарифов однажды изменится и
+// basicBudget станет платным, эндпоинт не должен остаться лазейкой, через
+// которую состояние меняется в обход шлюза. Плюс это единая точка загрузки
+// entitlement — familyId приходит в req.entitlement, отдельный familyOf() не нужен.
+//
+// Подменить содержимое восстановления нельзя: тело запроса здесь не читается
+// вовсе, источник данных — reset_backup ТОЙ ЖЕ строки family_states, а строка
+// выбирается по family_id текущего пользователя. Чужую семью восстановить
+// невозможно, произвольный backup подсунуть — тоже.
+//
+// (см. п. выше и lib/stateResetPurgeScheduler.js). COALESCE на data обязателен: колонка NOT NULL,
 // а reset_backup останется NULL, если семья использовала шифрование (данные лежали
 // только в reset_backup_enc).
-router.post('/restore-backup', auth, ah(async (req, res) => {
-  const fid = await familyOf(req.user.uid);
-  if (!fid) return res.status(404).json({ error: 'no_family' });
+router.post('/restore-backup', auth, requireCapability('basicBudget'), ah(async (req, res) => {
+  const fid = req.entitlement.familyId;
 
   const r = await db.query(
     `UPDATE family_states

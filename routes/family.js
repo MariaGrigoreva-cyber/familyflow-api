@@ -4,17 +4,27 @@ const db = require('../db');
 const auth = require('../middleware/auth');
 const ah = require('../middleware/asyncHandler');
 const { computePlan } = require('../lib/billingLogic');
+const { hasCapability } = require('../lib/capabilities');
 const validate = require('../middleware/validate');
 const { familyJoinSchema } = require('../lib/schemas');
 
 const CODE_ABC = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // без похожих символов
 const genCode = () => Array.from({ length: 6 }, () => CODE_ABC[Math.floor(Math.random() * CODE_ABC.length)]).join('');
 
-// Общий бюджет на нескольких участников — фича Pro (см. Settings.jsx на фронте).
+// Общий бюджет на нескольких участников — возможность familySharing из реестра
+// тарифов (lib/capabilities.js). Здесь спрашиваем реестр, а не сравниваем план
+// с литералом: состав Free/Pro меняется в одном месте.
+//
 // На free-тарифе семья остаётся в составе одного владельца; уже добавленных
 // участников при истечении подписки не выгоняем — ограничиваем только новые
-// приглашения/присоединения.
+// приглашения/присоединения. Это же и есть grandfathering для тех, кто успел
+// пригласить супруга на Pro: доступ к общему бюджету у них не отбирается.
 const FREE_MEMBER_LIMIT = 1;
+
+// Ответ остаётся 403 pro_required — на этот код у клиента (в том числе у уже
+// опубликованного RuStore v3) завязан текст про общий бюджет. Менять его на
+// общий 402 из requireCapability значило бы показывать не то сообщение.
+const canShareFamily = row => hasCapability(computePlan(row || {}), 'familySharing');
 
 router.get('/me', auth, ah(async (req, res) => {
   const r = await db.query(
@@ -35,7 +45,7 @@ router.post('/invite', auth, ah(async (req, res) => {
   const m = await db.query(
     "SELECT f.trial_ends_at, f.pro_until, m.family_id FROM family_members m JOIN families f ON f.id=m.family_id WHERE m.user_id=$1 AND m.role='owner'", [req.user.uid]);
   if (!m.rows.length) return res.status(403).json({ error: 'owner_only' });
-  if (computePlan(m.rows[0]) === 'free') return res.status(403).json({ error: 'pro_required' });
+  if (!canShareFamily(m.rows[0])) return res.status(403).json({ error: 'pro_required' });
   const code = genCode();
   await db.query('UPDATE families SET invite_code=$1 WHERE id=$2', [code, m.rows[0].family_id]);
   res.json({ code });
@@ -65,7 +75,7 @@ router.post('/join', auth, validate(familyJoinSchema), ah(async (req, res) => {
     // free-семью могли оба пройти проверку count до того, как любой из них закоммитится,
     // и превысить лимит.
     const target = await client.query('SELECT trial_ends_at, pro_until FROM families WHERE id=$1 FOR UPDATE', [fid]);
-    if (computePlan(target.rows[0] || {}) === 'free') {
+    if (!canShareFamily(target.rows[0])) {
       const cnt = await client.query('SELECT count(*)::int AS c FROM family_members WHERE family_id=$1', [fid]);
       if (cnt.rows[0].c >= FREE_MEMBER_LIMIT) {
         await client.query('ROLLBACK');
