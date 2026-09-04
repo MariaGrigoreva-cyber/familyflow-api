@@ -10,6 +10,7 @@ const authMw = require('../middleware/auth');
 const { sendMail, mailConfigured, renderTemplate, unsubscribeUrl, verifyUnsubscribeToken, hasMxRecord } = require('../lib/mail');
 const validate = require('../middleware/validate');
 const { registerSchema, loginSchema, changePasswordSchema, resetRequestSchema, resetConfirmSchema } = require('../lib/schemas');
+const { trialIntervalParam } = require('../lib/entitlement');
 
 // tv (token_version) — см. middleware/auth.js: смена/сброс пароля увеличивает
 // версию в БД и тем самым отзывает все ранее выданные токены.
@@ -62,8 +63,12 @@ router.post('/register', validate(registerSchema), ah(async (req, res) => {
       [email, hash, req.ip, sanitizeAttribution(attribution)]
     );
     const f = await client.query(
-      `INSERT INTO families(name, trial_ends_at) VALUES($1, now() + interval '30 days') RETURNING id`,
-      [familyName || 'Моя семья']
+      // Срок триала — единый для обоих потоков регистрации (см. lib/entitlement.js).
+      // Подставляется параметром, а не литералом в тексте запроса: раньше здесь
+      // и в Яндекс-потоке ниже стояли два независимых `interval '30 days'`, и их
+      // легко было развести по значению.
+      `INSERT INTO families(name, trial_ends_at) VALUES($1, now() + ($2 || ' days')::interval) RETURNING id`,
+      [familyName || 'Моя семья', trialIntervalParam()]
     );
     await client.query(
       "INSERT INTO family_members(family_id, user_id, role) VALUES($1, $2, 'owner')",
@@ -368,8 +373,9 @@ router.get('/yandex/callback', ah(async (req, res) => {
       );
       ({ id: userId, token_version: tokenVersion } = u.rows[0]);
       const f = await client.query(
-        `INSERT INTO families(name, trial_ends_at) VALUES($1, now() + interval '30 days') RETURNING id`,
-        ['Моя семья']
+        // Тот же срок, что и при обычной регистрации — см. lib/entitlement.js.
+        `INSERT INTO families(name, trial_ends_at) VALUES($1, now() + ($2 || ' days')::interval) RETURNING id`,
+        ['Моя семья', trialIntervalParam()]
       );
       await client.query(
         "INSERT INTO family_members(family_id, user_id, role) VALUES($1, $2, 'owner')",
