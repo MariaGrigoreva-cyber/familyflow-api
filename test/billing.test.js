@@ -182,3 +182,64 @@ describe('POST /billing/cancel-auto-renew', () => {
     expect(family.rows[0].yk_payment_method_id).toBeNull();
   });
 });
+
+// ── Контракт GET /billing/status ────────────────────────────────────────────
+// На этих полях целиком держится опубликованный RuStore-клиент v3, который не
+// обновится одновременно с бэкендом. Новые поля добавлять можно (клиент читает
+// ответ без валидации схемы и лишние ключи игнорирует), удалять и менять
+// семантику существующих — нельзя.
+describe('GET /billing/status — обратная совместимость', () => {
+  // Точный набор ключей, который читает v3 (см. BillingSection в его бандле).
+  const V3_FIELDS = [
+    'plan', 'trialEndsAt', 'proUntil', 'billingPeriod', 'autoRenew',
+    'autoChargeConsentAt', 'lastPaymentAt', 'prices',
+  ];
+
+  test('во время триала все поля старого контракта на месте', async () => {
+    const u = await registerUser();
+    const res = await request.get('/billing/status').set('Authorization', `Bearer ${u.token}`);
+    expect(res.status).toBe(200);
+    for (const f of V3_FIELDS) expect(res.body).toHaveProperty(f);
+    expect(res.body.plan).toBe('trial');
+    expect(typeof res.body.trialEndsAt).toBe('string');
+    // v3 читает status.prices[period] напрямую — числа обязаны быть числами.
+    expect(typeof res.body.prices.monthly).toBe('number');
+    expect(typeof res.body.prices.yearly).toBe('number');
+  });
+
+  test('после окончания триала контракт не ломается, plan становится free', async () => {
+    const u = await registerUser();
+    await db.query(
+      `UPDATE families SET trial_ends_at = now() - interval '1 day' WHERE id=$1`, [u.familyId]);
+    const res = await request.get('/billing/status').set('Authorization', `Bearer ${u.token}`);
+    expect(res.status).toBe(200);
+    for (const f of V3_FIELDS) expect(res.body).toHaveProperty(f);
+    expect(res.body.plan).toBe('free');
+  });
+
+  test('новые поля этапа 1 присутствуют и согласованы со старым plan', async () => {
+    const u = await registerUser();
+    const res = await request.get('/billing/status').set('Authorization', `Bearer ${u.token}`);
+    expect(res.body).toMatchObject({
+      plan: 'trial',
+      access: true,
+      subscriptionStatus: 'trial',
+      isTrial: true,
+      isExpired: false,
+      hasActiveSubscription: false,
+    });
+    // Срок считает сервер — фронт больше не должен вычислять его сам.
+    expect(res.body.trialDaysLeft).toBe(30);
+  });
+
+  test('новые поля не подменяют старые: plan остаётся строкой прежнего словаря', async () => {
+    const u = await registerUser();
+    await db.query(
+      `UPDATE families SET pro_until = now() + interval '30 days' WHERE id=$1`, [u.familyId]);
+    const res = await request.get('/billing/status').set('Authorization', `Bearer ${u.token}`);
+    expect(['trial', 'pro', 'free']).toContain(res.body.plan);
+    expect(res.body.plan).toBe('pro');
+    expect(res.body.hasActiveSubscription).toBe(true);
+    expect(res.body.access).toBe(true);
+  });
+});

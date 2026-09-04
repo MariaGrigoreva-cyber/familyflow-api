@@ -5,18 +5,24 @@ const db = require('../db');
 const authMw = require('../middleware/auth');
 const ah = require('../middleware/asyncHandler');
 const yk = require('../lib/yookassa');
-const { applySucceededPayment, computePlan } = require('../lib/billingLogic');
+const { applySucceededPayment } = require('../lib/billingLogic');
+const { computeEntitlement } = require('../lib/entitlement');
 const validate = require('../middleware/validate');
 const { billingCheckoutSchema } = require('../lib/schemas');
+const { prices, priceRub } = require('../lib/pricing');
 
-const PRICE = {
-  monthly: Number(process.env.PRICE_MONTHLY_RUB || 199),
-  yearly: Number(process.env.PRICE_YEARLY_RUB || 999),
-};
+// Цена живёт в lib/pricing.js и только там (раньше этот объект был объявлен
+// здесь и ещё раз в lib/scheduler.js — две копии могли разойтись, и человек
+// получил бы письмо с одной суммой, а списалась бы другая). Пересборка состава
+// Free/Pro цену НЕ меняет.
 
 router.get('/status', authMw, ah(async (req, res) => {
+  // f.plan из выборки убран намеренно: колонка устарела и не отражает
+  // действительность (у неоплативших семей она навсегда остаётся 'trial', даже
+  // когда триал давно кончился). План считается из дат — trial_ends_at/pro_until.
+  // После этой правки families.plan нигде не читается, кроме schema.sql.
   const r = await db.query(
-    `SELECT f.plan, f.trial_ends_at, f.pro_until, f.billing_period, f.auto_renew, f.auto_charge_consent_at,
+    `SELECT f.trial_ends_at, f.pro_until, f.billing_period, f.auto_renew, f.auto_charge_consent_at,
             (SELECT created_at FROM payments p
               WHERE p.family_id=f.id AND p.status='succeeded' AND p.refunded_at IS NULL
               ORDER BY created_at DESC LIMIT 1) AS last_payment_at
@@ -24,15 +30,38 @@ router.get('/status', authMw, ah(async (req, res) => {
       WHERE m.user_id=$1`, [req.user.uid]);
   if (!r.rows.length) return res.status(404).json({ error: 'no_family' });
   const row = r.rows[0];
+  const ent = computeEntitlement(row);
   res.json({
-    plan: computePlan(row),
+    // ── Существующий контракт. НЕ МЕНЯТЬ и НЕ УДАЛЯТЬ: на этих полях целиком
+    // держится опубликованный RuStore-клиент v3 (plan → isPro, prices читается
+    // напрямую как status.prices[period]). Любая правка семантики здесь ломает
+    // приложение у тех, кто ещё не обновился.
+    plan: ent.plan,
     trialEndsAt: row.trial_ends_at,
     proUntil: row.pro_until,
     billingPeriod: row.billing_period,
     autoRenew: row.auto_renew,
     autoChargeConsentAt: row.auto_charge_consent_at,
     lastPaymentAt: row.last_payment_at,
-    prices: PRICE,
+    prices: prices(),
+    // ── Добавлено на этапе 1. Только новые ключи — старый клиент читает ответ
+    // через res.json() без валидации схемы и незнакомые поля игнорирует.
+    // Фронт больше не считает срок сам: trialDaysLeft приходит с сервера и не
+    // зависит от часов на устройстве.
+    access: ent.access,
+    subscriptionStatus: ent.subscriptionStatus,
+    isTrial: ent.isTrial,
+    isExpired: ent.isExpired,
+    trialDaysLeft: ent.trialDaysLeft,
+    hasActiveSubscription: ent.hasActiveSubscription,
+    // ── Добавлено при пересборке тарифов ─────────────────────────────────
+    // Состав тарифа в явном виде: { forecast: true, aiAssistant: false, ... }.
+    // Фронт рисует интерфейс ПО НЕЙ и своей таблицы Free/Pro не держит —
+    // иначе при следующем изменении состава тарифов пришлось бы править две
+    // независимые копии и они бы разошлись. Ответ на этот запрос уже
+    // загружается один раз при старте приложения, дополнительных запросов
+    // карта возможностей не добавляет.
+    capabilities: ent.capabilities,
   });
 }));
 
@@ -41,7 +70,7 @@ router.post('/checkout', authMw, validate(billingCheckoutSchema), ah(async (req,
   const m = await db.query("SELECT family_id FROM family_members WHERE user_id=$1 AND role='owner'", [req.user.uid]);
   if (!m.rows.length) return res.status(403).json({ error: 'owner_only' });
   const familyId = m.rows[0].family_id;
-  const amount = PRICE[period];
+  const amount = priceRub(period);
   const frontendUrl = (process.env.CORS_ORIGIN || '').split(',')[0].trim() || 'https://app.myfamilyflow.ru';
 
   // Защита от двойного клика «Оплатить»: если недавно уже создан платёж этой же
