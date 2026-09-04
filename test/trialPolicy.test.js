@@ -102,13 +102,15 @@ describe('порог: часовые пояса и некорректные зн
     spy.mockRestore();
   });
 
-  test('порог не задан — TRIAL_DAYS действует сразу, с предупреждением в лог', () => {
+  test('порог не задан — новая политика НЕ включается, только предупреждение', () => {
     const spy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     delete process.env.TRIAL_POLICY_CUTOFF_AT;
     process.env.TRIAL_DAYS = '14';
-    expect(effectiveTrialDays()).toBe(14);
-    // Предупреждение важно: без порога не зафиксирован момент перехода,
-    // а без него невозможен откатный SQL по когорте.
+    // Раньше здесь ожидалось 14: TRIAL_DAYS действовал сразу. Теперь это
+    // предохранитель — одной переменной, забытой в панели хостинга, не должно
+    // хватать, чтобы молча урезать срок всем новым регистрациям.
+    // Подробности и остальные случаи — в test/trialFailSafe.test.js.
+    expect(effectiveTrialDays()).toBe(30);
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
   });

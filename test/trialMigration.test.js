@@ -61,10 +61,15 @@ describe('schema.sql идемпотентен относительно trial_end
 });
 
 describe('срок триала при регистрации', () => {
+  // Возвращаем ОБЕ переменные: тесты ниже включают политику целиком, и
+  // забытый порог поменял бы поведение всех последующих файлов.
   const original = process.env.TRIAL_DAYS;
+  const originalCutoff = process.env.TRIAL_POLICY_CUTOFF_AT;
   afterEach(() => {
     if (original === undefined) delete process.env.TRIAL_DAYS;
     else process.env.TRIAL_DAYS = original;
+    if (originalCutoff === undefined) delete process.env.TRIAL_POLICY_CUTOFF_AT;
+    else process.env.TRIAL_POLICY_CUTOFF_AT = originalCutoff;
   });
 
   // Сравниваем с ожидаемым сроком, допуская несколько минут на выполнение теста.
@@ -80,10 +85,22 @@ describe('срок триала при регистрации', () => {
     expectDaysFromNow(await trialEndsAt(u.familyId), 30);
   });
 
-  test('TRIAL_DAYS применяется к новой регистрации', async () => {
+  test('TRIAL_DAYS применяется к новой регистрации — при заданном моменте перехода', async () => {
+    // Порог обязателен: без него срабатывает предохранитель и срок остаётся
+    // прежним, каким бы ни был TRIAL_DAYS (см. test/trialFailSafe.test.js).
     process.env.TRIAL_DAYS = '14';
+    process.env.TRIAL_POLICY_CUTOFF_AT = '2020-01-01T00:00:00Z';
     const u = await registerUser();
     expectDaysFromNow(await trialEndsAt(u.familyId), 14);
+  });
+
+  test('без момента перехода TRIAL_DAYS на регистрацию не влияет', async () => {
+    const spy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    process.env.TRIAL_DAYS = '14';
+    delete process.env.TRIAL_POLICY_CUTOFF_AT;
+    const u = await registerUser();
+    expectDaysFromNow(await trialEndsAt(u.familyId), 30);
+    spy.mockRestore();
   });
 
   test('мусор в TRIAL_DAYS не даёт нулевой триал — откат к 30', async () => {
@@ -94,15 +111,20 @@ describe('срок триала при регистрации', () => {
     spy.mockRestore();
   });
 
-  test('смена TRIAL_DAYS не трогает уже выданные сроки', async () => {
+  test('смена политики не трогает уже выданные сроки', async () => {
     delete process.env.TRIAL_DAYS;
+    delete process.env.TRIAL_POLICY_CUTOFF_AT;
     const old = await registerUser();
     const oldEnd = await trialEndsAt(old.familyId);
 
+    // Включаем новую политику целиком: новый срок И момент перехода.
     process.env.TRIAL_DAYS = '14';
+    process.env.TRIAL_POLICY_CUTOFF_AT = '2020-01-01T00:00:00Z';
     const fresh = await registerUser();
 
+    // Старому — ровно то, что было обещано при регистрации.
     expect((await trialEndsAt(old.familyId)).getTime()).toBe(oldEnd.getTime());
+    // Новому — новый срок.
     expectDaysFromNow(await trialEndsAt(fresh.familyId), 14);
   });
 });

@@ -38,7 +38,11 @@ describe('форма параметра', () => {
   });
 
   test('единица не задваивается ни при каком сроке', () => {
-    const original = process.env.TRIAL_DAYS;
+    const saved = [process.env.TRIAL_DAYS, process.env.TRIAL_POLICY_CUTOFF_AT];
+    // Порог в прошлом — иначе сработает предохранитель и срок всегда будет 30
+    // (см. test/trialFailSafe.test.js). Здесь проверяется ФОРМА строки, поэтому
+    // политика должна быть включена.
+    process.env.TRIAL_POLICY_CUTOFF_AT = '2020-01-01T00:00:00Z';
     try {
       for (const days of ['1', '14', '30', '365']) {
         process.env.TRIAL_DAYS = days;
@@ -46,8 +50,9 @@ describe('форма параметра', () => {
         expect(trialIntervalParam()).not.toMatch(/days\s+days/);
       }
     } finally {
-      if (original === undefined) delete process.env.TRIAL_DAYS;
-      else process.env.TRIAL_DAYS = original;
+      for (const [k, v] of [['TRIAL_DAYS', saved[0]], ['TRIAL_POLICY_CUTOFF_AT', saved[1]]]) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
     }
   });
 });

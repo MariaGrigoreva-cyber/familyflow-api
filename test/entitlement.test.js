@@ -89,10 +89,20 @@ describe('TRIAL_DAYS', () => {
     expect(trialDays()).toBe(30);
   });
 
-  test('корректное значение применяется', () => {
+  test('корректное значение читается парсером', () => {
     process.env.TRIAL_DAYS = '14';
     expect(trialDays()).toBe(14);
-    expect(trialIntervalParam()).toBe('14 days');
+  });
+
+  test('но без момента перехода политика его не применяет', () => {
+    // trialDays() — это разбор переменной, а не решение. Решает
+    // effectiveTrialDays(), и без TRIAL_POLICY_CUTOFF_AT новый срок не
+    // включается: см. test/trialFailSafe.test.js.
+    const spy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    delete process.env.TRIAL_POLICY_CUTOFF_AT;
+    process.env.TRIAL_DAYS = '14';
+    expect(trialIntervalParam()).toBe('30 days');
+    spy.mockRestore();
   });
 
   test('мусор и значения вне диапазона откатываются к 30, а не роняют API', () => {
