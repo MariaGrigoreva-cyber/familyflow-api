@@ -16,7 +16,7 @@ jest.mock('../lib/mail', () => {
 });
 
 const mail = require('../lib/mail');
-const { sendTrialEndingReminders, SUBJECT } = require('../lib/trialScheduler');
+const { sendTrialEndingReminders, SUBJECT, SELECT_RECIPIENTS } = require('../lib/trialScheduler');
 const { db, resetDb, registerUser } = require('./helpers');
 
 beforeEach(async () => { await resetDb(); jest.clearAllMocks(); });
@@ -102,6 +102,35 @@ describe('дедупликация', () => {
     expect(await sendTrialEndingReminders()).toBe(0);
     expect(await sendTrialEndingReminders()).toBe(0);
     expect(trialMails()).toHaveLength(1);
+  });
+
+  // Регрессия на потерю точности. Прежний код записывал дату, прочитанную
+  // через драйвер pg: тот отдаёт timestamptz как JS Date с точностью до
+  // миллисекунд, а Postgres хранит микросекунды. Записанное обратно значение
+  // переставало равняться trial_ends_at (…057616 → …057), и отбор выбирал
+  // строку снова на КАЖДОМ часовом прогоне. Письмо при этом не дублировалось —
+  // спасала вторая проверка внутри UPDATE, — поэтому обычный тест «не пришло
+  // дважды» этого не ловил. Ловит только проверка самого отбора.
+  test('после отправки строка выпадает из отбора, а не только из UPDATE', async () => {
+    const u = await registerUser();
+    await setTrialEnd(u.familyId, "now() + interval '36 hours'");
+    await sendTrialEndingReminders();
+
+    const again = await db.query(SELECT_RECIPIENTS);
+    expect(again.rows.map(r => r.id)).not.toContain(u.familyId);
+    expect(again.rows).toHaveLength(0);
+  });
+
+  test('записанная отметка совпадает с датой окончания ДО микросекунды', async () => {
+    const u = await registerUser();
+    await setTrialEnd(u.familyId, "now() + interval '36 hours'");
+    await sendTrialEndingReminders();
+    // Сравниваем внутри базы: через JS обе даты усеклись бы до миллисекунд и
+    // разница, из-за которой всё и ломалось, стала бы невидимой.
+    const r = await db.query(
+      'SELECT (trial_end_email_sent_for = trial_ends_at) AS same FROM families WHERE id=$1',
+      [u.familyId]);
+    expect(r.rows[0].same).toBe(true);
   });
 
   test('отметка ставится по конкретной дате окончания', async () => {
