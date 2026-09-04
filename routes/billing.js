@@ -54,6 +54,11 @@ router.get('/status', authMw, ah(async (req, res) => {
     isExpired: ent.isExpired,
     trialDaysLeft: ent.trialDaysLeft,
     hasActiveSubscription: ent.hasActiveSubscription,
+    // Стадия пробного периода: active | warning_4 | warning_2 | last_day |
+    // expired | null. По ней интерфейс решает, показывать ли баннер и какой —
+    // сам он срок не считает и часам устройства не доверяет. Поле новое, старый
+    // клиент его просто игнорирует.
+    trialStage: ent.trialStage,
     // ── Добавлено при пересборке тарифов ─────────────────────────────────
     // Состав тарифа в явном виде: { forecast: true, aiAssistant: false, ... }.
     // Фронт рисует интерфейс ПО НЕЙ и своей таблицы Free/Pro не держит —

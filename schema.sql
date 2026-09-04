@@ -58,6 +58,10 @@ ALTER TABLE families ADD COLUMN IF NOT EXISTS auto_renew boolean NOT NULL DEFAUL
 ALTER TABLE families ADD COLUMN IF NOT EXISTS yk_payment_method_id text; -- сохранённый способ оплаты в ЮKassa для автосписания
 ALTER TABLE families ADD COLUMN IF NOT EXISTS cancel_token text; -- разовая ссылка «отключить автопродление» из письма-напоминания
 ALTER TABLE families ADD COLUMN IF NOT EXISTS renewal_reminder_sent_for timestamptz; -- за какой pro_until уже отправили напоминание — не дублировать
+-- За какой trial_ends_at уже отправлено письмо об окончании пробного периода
+-- (lib/trialScheduler.js). Храним дату, а не флаг: флаг сломался бы, если дата
+-- окончания когда-нибудь изменится, а сравнение с самой датой — нет.
+ALTER TABLE families ADD COLUMN IF NOT EXISTS trial_end_email_sent_for timestamptz;
 
 -- Новым семьям — триал с полным доступом (длительность задаёт TRIAL_DAYS, см.
 -- lib/entitlement.js; по умолчанию 30 дней). Существующие семьи (заведённые до
@@ -298,3 +302,31 @@ CREATE TABLE IF NOT EXISTS ai_feedback (
 -- выше её туда не добавит, поэтому отдельный ALTER (как и для остальных
 -- поздних колонок в этом файле).
 ALTER TABLE ai_feedback ADD COLUMN IF NOT EXISTS answer_excerpt text;
+
+-- ── История версий снапшота бюджета ─────────────────────────────────────────
+-- Нужна для трёхстороннего слияния в PUT /state (lib/stateMerge.js). Клиент
+-- присылает baseUpdatedAt — версию, которую он видел последней; сервер достаёт
+-- отсюда тот самый снапшот и сливает две ветки относительно него, вместо того
+-- чтобы принимать одну и терять другую.
+--
+-- Почему история живёт на СЕРВЕРЕ, а не на клиенте: опубликованный клиент
+-- RuStore про слияние ничего не знает и обновиться немедленно не может, но
+-- baseUpdatedAt он и так шлёт — значит, чинится без выката в магазин.
+--
+-- Шифрование — то же, что у family_states: при заданном DATA_ENC_KEY реальные
+-- данные лежат только в data_enc, а data держится пустой ('{}'). Хранить
+-- историю в открытом виде было бы дырой в обход шифрования основной таблицы.
+CREATE TABLE IF NOT EXISTS family_state_versions (
+  family_id   uuid NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+  -- Совпадает с family_states.updated_at того момента, когда версия была
+  -- текущей: именно это значение клиент потом присылает как baseUpdatedAt.
+  updated_at  timestamptz NOT NULL,
+  data        jsonb NOT NULL DEFAULT '{}'::jsonb,
+  data_enc    bytea,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (family_id, updated_at)
+);
+-- Выборка базы идёт точным попаданием в PK, а этот индекс — для чистки
+-- (lib/stateVersionPurgeScheduler.js): «оставить N последних для семьи».
+CREATE INDEX IF NOT EXISTS idx_family_state_versions_family_updated
+  ON family_state_versions(family_id, updated_at DESC);
