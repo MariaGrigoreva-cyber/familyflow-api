@@ -101,10 +101,15 @@ describe('после окончания триала базовый бюджет
   });
 
   test('отметить оплаченный платёж можно и на бесплатном тарифе', async () => {
-    await request.put('/state').set(auth(u))
+    // baseUpdatedAt здесь не про тарифы, а про то, как пишет настоящий клиент:
+    // непустое состояние без указания базы правится через 409 (см. state.test.js).
+    const first = await request.put('/state').set(auth(u))
       .send({ data: { appState: { weekItems: { '2026-W36': [{ id: 'a', isDone: false }] } } } });
     const res = await request.put('/state').set(auth(u))
-      .send({ data: { appState: { weekItems: { '2026-W36': [{ id: 'a', isDone: true }] } } } });
+      .send({
+        data: { appState: { weekItems: { '2026-W36': [{ id: 'a', isDone: true }] } } },
+        baseUpdatedAt: first.body.updatedAt,
+      });
     expect(res.status).toBe(200);
     const read = await request.get('/state').set(auth(u));
     expect(read.body.data.appState.weekItems['2026-W36'][0].isDone).toBe(true);

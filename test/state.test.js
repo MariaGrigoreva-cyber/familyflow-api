@@ -113,13 +113,171 @@ describe('PUT /state — сохранение и оптимистичная бл
     expect(getRes.body.data).toEqual({ appState: { v: 'C' } });
   });
 
-  test('без baseUpdatedAt всегда перезаписывает (нет базы для сравнения)', async () => {
+  // Раньше здесь было ровно обратное: «без baseUpdatedAt всегда перезаписывает».
+  // Это и был механизм тихой потери — клиент, потерявший метку версии (первый
+  // запуск на новом устройстве, очищенное хранилище), затирал чужой бюджет.
+  // Доказать общего предка нечем, поэтому теперь отказ, а не перезапись.
+  test('без baseUpdatedAt непустое состояние не перезаписывается — 409', async () => {
     const u = await registerUser();
     await request.put('/state').set('Authorization', `Bearer ${u.token}`).send({ data: { appState: { v: 'A' } } });
     const second = await request.put('/state').set('Authorization', `Bearer ${u.token}`).send({ data: { appState: { v: 'D' } } });
-    expect(second.status).toBe(200);
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe('BASE_REQUIRED');
+    expect(second.body.data).toEqual({ appState: { v: 'A' } });
+
     const getRes = await request.get('/state').set('Authorization', `Bearer ${u.token}`);
-    expect(getRes.body.data).toEqual({ appState: { v: 'D' } });
+    expect(getRes.body.data).toEqual({ appState: { v: 'A' } });
+  });
+
+  test('без baseUpdatedAt в пустое состояние писать можно (терять нечего)', async () => {
+    const u = await registerUser();
+    const res = await request.put('/state').set('Authorization', `Bearer ${u.token}`).send({ data: { appState: { v: 'A' } } });
+    expect(res.status).toBe(200);
+  });
+});
+
+// Ради этого всё и делалось: две ветки соединяются, а не побеждает одна.
+describe('PUT /state — трёхстороннее слияние', () => {
+  // Готовит расхождение: общая база, затем «чужая» запись с другого устройства.
+  // Возвращает baseUpdatedAt, с которым отставший клиент придёт со своей версией.
+  const diverge = async (token, base, theirs) => {
+    const first = await request.put('/state').set('Authorization', `Bearer ${token}`).send({ data: base });
+    const second = await request.put('/state').set('Authorization', `Bearer ${token}`)
+      .send({ data: theirs, baseUpdatedAt: first.body.updatedAt });
+    expect(second.status).toBe(200);
+    return first.body.updatedAt;
+  };
+
+  test('отметка с отставшего устройства не теряется и не затирает чужую', async () => {
+    const u = await registerUser();
+    const base = { appState: { payments: {}, transactions: [] } };
+    // Другое устройство отметило платёж b
+    const theirs = { appState: { payments: { b: { isDone: true } }, transactions: [] } };
+    const baseAt = await diverge(u.token, base, theirs);
+
+    // Отставший клиент отметил платёж a, зная только базу
+    const mine = { appState: { payments: { a: { isDone: true } }, transactions: [] } };
+    const res = await request.put('/state').set('Authorization', `Bearer ${u.token}`)
+      .send({ data: mine, baseUpdatedAt: baseAt, acceptsMerge: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.merged).toBe(true);
+    expect(res.body.data.appState.payments).toEqual({ a: { isDone: true }, b: { isDone: true } });
+
+    const getRes = await request.get('/state').set('Authorization', `Bearer ${u.token}`);
+    expect(getRes.body.data.appState.payments).toEqual({ a: { isDone: true }, b: { isDone: true } });
+  });
+
+  // Опубликованный клиент RuStore про слияние не знает и поле data при 200
+  // игнорирует. Если отдать ему 200, он останется со своей версией, а следующим
+  // сохранением сервер прочитает чужие правки как удалённые — слияние отменит
+  // само себя. Поэтому такому клиенту тот же слитый результат уходит кодом 409:
+  // эта ветка у него есть, и он примет серверное состояние.
+  test('клиент без acceptsMerge получает слитый результат кодом 409', async () => {
+    const u = await registerUser();
+    const base = { appState: { payments: {} } };
+    const theirs = { appState: { payments: { b: { isDone: true } } } };
+    const baseAt = await diverge(u.token, base, theirs);
+
+    const res = await request.put('/state').set('Authorization', `Bearer ${u.token}`)
+      .send({ data: { appState: { payments: { a: { isDone: true } } } }, baseUpdatedAt: baseAt });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('MERGED');
+    // Обе отметки на месте — слияние состоялось и записано, отличается только код
+    expect(res.body.data.appState.payments).toEqual({ a: { isDone: true }, b: { isDone: true } });
+
+    const getRes = await request.get('/state').set('Authorization', `Bearer ${u.token}`);
+    expect(getRes.body.data.appState.payments).toEqual({ a: { isDone: true }, b: { isDone: true } });
+    expect(getRes.body.updatedAt).toBe(res.body.updatedAt);
+  });
+
+  test('траты, добавленные на двух устройствах, складываются', async () => {
+    const u = await registerUser();
+    const base = { appState: { transactions: [] } };
+    const theirs = { appState: { transactions: [{ id: 't', amount: 70, date: '2026-09-02T00:00:00.000Z' }] } };
+    const baseAt = await diverge(u.token, base, theirs);
+
+    const mine = { appState: { transactions: [{ id: 'm', amount: 50, date: '2026-09-03T00:00:00.000Z' }] } };
+    const res = await request.put('/state').set('Authorization', `Bearer ${u.token}`)
+      .send({ data: mine, baseUpdatedAt: baseAt, acceptsMerge: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.appState.transactions.map(t => t.id)).toEqual(['m', 't']);
+  });
+
+  test('база вне истории — 409, а не перезапись вслепую', async () => {
+    const u = await registerUser();
+    const first = await request.put('/state').set('Authorization', `Bearer ${u.token}`).send({ data: { appState: { v: 'A' } } });
+    await request.put('/state').set('Authorization', `Bearer ${u.token}`)
+      .send({ data: { appState: { v: 'B' } }, baseUpdatedAt: first.body.updatedAt });
+
+    const res = await request.put('/state').set('Authorization', `Bearer ${u.token}`)
+      .send({ data: { appState: { v: 'C' } }, baseUpdatedAt: new Date(0).toISOString() });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('BASE_NOT_FOUND');
+    expect(res.body.data).toEqual({ appState: { v: 'B' } });
+  });
+
+  test('повторная отправка уже учтённого состояния не двигает версию', async () => {
+    const u = await registerUser();
+    const base = { appState: { payments: {} } };
+    const theirs = { appState: { payments: { a: { isDone: true } } } };
+    const baseAt = await diverge(u.token, base, theirs);
+    const beforeAt = (await request.get('/state').set('Authorization', `Bearer ${u.token}`)).body.updatedAt;
+
+    // Клиент шлёт свою старую версию, в которой ничего нового нет — слияние
+    // даёт ровно то, что уже лежит на сервере, значит писать нечего.
+    const res = await request.put('/state').set('Authorization', `Bearer ${u.token}`)
+      .send({ data: base, baseUpdatedAt: baseAt, acceptsMerge: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.updatedAt).toBe(beforeAt);
+  });
+
+  test('слияние работает и при включённом шифровании', async () => {
+    const originalKey = process.env.DATA_ENC_KEY;
+    process.env.DATA_ENC_KEY = crypto.randomBytes(32).toString('hex');
+    try {
+      const u = await registerUser();
+      const base = { appState: { payments: {} } };
+      const theirs = { appState: { payments: { b: { isDone: true } } } };
+      const baseAt = await diverge(u.token, base, theirs);
+
+      const res = await request.put('/state').set('Authorization', `Bearer ${u.token}`)
+        .send({ data: { appState: { payments: { a: { isDone: true } } } }, baseUpdatedAt: baseAt, acceptsMerge: true });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.appState.payments).toEqual({ a: { isDone: true }, b: { isDone: true } });
+
+      // История версий тоже зашифрована — иначе это дыра в обход шифрования
+      // основной таблицы.
+      const v = await db.query('SELECT data, data_enc FROM family_state_versions WHERE family_id=$1 LIMIT 1', [u.familyId]);
+      expect(v.rows[0].data).toEqual({});
+      expect(Buffer.isBuffer(v.rows[0].data_enc)).toBe(true);
+    } finally {
+      if (originalKey === undefined) delete process.env.DATA_ENC_KEY;
+      else process.env.DATA_ENC_KEY = originalKey;
+    }
+  });
+
+  test('после сброса данных автосейв со второго устройства их не воскрешает', async () => {
+    const u = await registerUser();
+    const first = await request.put('/state').set('Authorization', `Bearer ${u.token}`)
+      .send({ data: { appState: { transactions: [{ id: 'x', amount: 10 }] } } });
+
+    await request.post('/state/reset').set('Authorization', `Bearer ${u.token}`);
+
+    // Отставшее устройство ещё держит снапшот, снятый до сброса
+    const res = await request.put('/state').set('Authorization', `Bearer ${u.token}`)
+      .send({ data: { appState: { transactions: [{ id: 'x', amount: 10 }] } }, baseUpdatedAt: first.body.updatedAt });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('STATE_WAS_RESET');
+
+    const getRes = await request.get('/state').set('Authorization', `Bearer ${u.token}`);
+    expect(getRes.body.data).toEqual({});
   });
 });
 

@@ -10,7 +10,7 @@ const request = supertest(app);
 async function resetDb() {
   await db.query(`TRUNCATE TABLE
     push_payment_reminders_sent, push_subscriptions, payments,
-    family_states, family_members, families, users
+    family_state_versions, family_states, family_members, families, users
     RESTART IDENTITY CASCADE`);
 }
 

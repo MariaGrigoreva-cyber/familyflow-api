@@ -1,6 +1,17 @@
 // Снапшот состояния семьи: GET отдаёт, PUT сохраняет.
-// Оптимистичная блокировка: клиент присылает baseUpdatedAt (что он видел последним);
-// если на сервере новее — 409 и актуальные данные, клиент решает что делать.
+//
+// СИНХРОНИЗАЦИЯ — СЛИЯНИЕ, А НЕ ПЕРЕЗАПИСЬ. Клиент присылает baseUpdatedAt —
+// версию, которую он видел последней. Если сервер с тех пор ушёл вперёд, запись
+// НЕ отклоняется и НЕ затирает чужое: сервер достаёт из family_state_versions
+// ту самую базу и трёхсторонним слиянием соединяет обе ветки (lib/stateMerge.js).
+// Отказ (409) остаётся только там, где общего предка доказать нечем.
+//
+// Так было не всегда. Раньше PUT был last-write-wins по всему снапшоту, а без
+// baseUpdatedAt перезаписывал что угодно безусловно. Отметки «платёж получен» —
+// это операции: два устройства, отметившие разные платежи, не конфликтуют, и
+// терять одну из правок нельзя. На практике это и выстрелило: отмеченная на
+// телефоне зарплата исчезала при заходе с компьютера, а «остаток на руках»
+// падал на всю её сумму (доход считается только по отметкам isDone).
 // Данные шифруются перед сохранением (см. lib/crypto.js) — в БД лежит только
 // шифротекст в data_enc, колонка data держится пустой ('{}').
 const router = require('express').Router();
@@ -11,6 +22,7 @@ const ah = require('../middleware/asyncHandler');
 const { encryptJSON, decryptJSON, configured } = require('../lib/crypto');
 const validate = require('../middleware/validate');
 const { stateSchema } = require('../lib/schemas');
+const { mergeStates, eq } = require('../lib/stateMerge');
 
 // ── Временное профилирование GET /state ──────────────────────────────────────
 // Включается переменной окружения STATE_TIMING=1 (по умолчанию выключено, в лог
@@ -98,36 +110,155 @@ router.get('/', timing, auth, ah(async (req, res) => {
 // единственным местом, где решается доступ — если состав тарифов однажды
 // изменится, менять придётся только реестр возможностей.
 router.put('/', auth, requireCapability('basicBudget'), validate(stateSchema), ah(async (req, res) => {
-  const { data, baseUpdatedAt } = req.body || {};
+  const { data, baseUpdatedAt, acceptsMerge } = req.body || {};
   if (JSON.stringify(data).length > 2_000_000) return res.status(413).json({ error: 'too_large' });
   const fid = req.entitlement.familyId;
 
-  const cur = await db.query('SELECT updated_at FROM family_states WHERE family_id=$1', [fid]);
-  const serverAt = cur.rows[0]?.updated_at?.toISOString?.() || null;
-  if (baseUpdatedAt && serverAt && new Date(serverAt) > new Date(baseUpdatedAt)) {
-    const fresh = await db.query('SELECT data, data_enc, updated_at FROM family_states WHERE family_id=$1', [fid]);
-    let freshData;
-    try { freshData = readData(fresh.rows[0]); }
-    catch (e) { return res.status(e.status || 500).json({ error: e.message }); }
-    return res.status(409).json({ error: 'conflict', data: freshData, updatedAt: fresh.rows[0].updated_at });
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // FOR UPDATE обязателен. Раньше проверка версии и запись шли двумя
+    // отдельными запросами вне транзакции: два одновременных PUT успевали
+    // прочитать одну и ту же версию, оба проходили проверку, и второй затирал
+    // первого. Блокировка строки семьи выстраивает их в очередь.
+    const cur = await client.query(
+      'SELECT data, data_enc, updated_at, reset_at FROM family_states WHERE family_id=$1 FOR UPDATE', [fid]);
+    const row = cur.rows[0];
+
+    let serverData;
+    try { serverData = readData(row); }
+    catch (e) { await client.query('ROLLBACK'); return res.status(e.status || 500).json({ error: e.message }); }
+
+    const serverAt = row?.updated_at || null;
+    const serverEmpty = !serverAt || !serverData || Object.keys(serverData).length === 0;
+    // Обе стороны сравнения усечены до миллисекунд: клиент получает updatedAt
+    // строкой из toISOString(), а timestamptz в Postgres хранит микросекунды.
+    const clientIsBehind = !!(baseUpdatedAt && serverAt
+      && serverAt.getTime() > new Date(baseUpdatedAt).getTime());
+
+    // Состояние пустое, потому что его только что сбросили, а клиент всё ещё
+    // держит снапшот, снятый ДО сброса. Пустая версия «моложе» его базы, и без
+    // этой проверки автосейв со второго устройства просто воскресил бы стёртый
+    // бюджет: пустое состояние проходит по ветке serverEmpty как обычная запись.
+    // Отдаём 409 — клиент примет пустое состояние, как и остальные устройства.
+    if (serverEmpty && row?.reset_at && clientIsBehind
+      && new Date(baseUpdatedAt).getTime() < row.reset_at.getTime()) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'conflict', code: 'STATE_WAS_RESET', data: serverData, updatedAt: serverAt,
+      });
+    }
+
+    let toWrite = data;
+    let merged = false;
+
+    if (!serverEmpty && clientIsBehind) {
+      // Сервер ушёл вперёд. Пытаемся не отказать, а соединить обе ветки —
+      // для этого нужна общая база, та самая версия, которую клиент видел.
+      const baseRow = await client.query(
+        `SELECT data, data_enc FROM family_state_versions
+          WHERE family_id=$1
+            AND date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $2::timestamptz)`,
+        [fid, baseUpdatedAt]);
+
+      if (!baseRow.rows[0]) {
+        // Общего предка нет (версия старше срока хранения, либо запись сделана
+        // до появления истории). Соединить ветки нечем, а перезаписывать чужие
+        // данные вслепую — ровно та потеря, от которой мы уходим. Отдаём 409:
+        // клиент получает актуальные данные и решает сам.
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'conflict', code: 'BASE_NOT_FOUND', data: serverData, updatedAt: serverAt,
+        });
+      }
+
+      let baseData;
+      try { baseData = readData(baseRow.rows[0]); }
+      catch (e) { await client.query('ROLLBACK'); return res.status(e.status || 500).json({ error: e.message }); }
+
+      toWrite = mergeStates(baseData, data, serverData);
+      merged = true;
+    } else if (!serverEmpty && !baseUpdatedAt) {
+      // Клиент не сказал, от какой версии он отталкивается. Раньше это было
+      // разрешением перезаписать что угодно (и тестом «без baseUpdatedAt всегда
+      // перезаписывает»). Доказать общего предка нечем — значит, 409.
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'conflict', code: 'BASE_REQUIRED', data: serverData, updatedAt: serverAt,
+      });
+    }
+
+    // Слияние не изменило серверную версию (клиент прислал то, что уже учтено):
+    // не двигаем updated_at впустую — иначе у остальных устройств без нужды
+    // протухает их база.
+    if (merged && eq(toWrite, serverData)) {
+      await client.query('COMMIT');
+      // Писать нечего, но клиент всё равно отстал от этой версии — результат
+      // ему нужен ровно по той же причине, что и ниже.
+      if (acceptsMerge) return res.json({ ok: true, updatedAt: serverAt, data: serverData, merged: true });
+      return res.status(409).json({ error: 'conflict', code: 'MERGED', data: serverData, updatedAt: serverAt });
+    }
+
+    const useEnc = configured();
+    const enc = v => (useEnc ? encryptJSON(v) : null);
+    const plain = v => (useEnc ? {} : v); // при шифровании в data реальные данные не пишем
+
+    // Предыдущее состояние тоже кладём в историю: сразу после выката её ещё
+    // нет, а именно эту версию держат на руках все остальные устройства — без
+    // неё их первое же слияние упрётся в BASE_NOT_FOUND.
+    if (serverAt) {
+      await client.query(
+        `INSERT INTO family_state_versions(family_id, updated_at, data, data_enc)
+         VALUES($1,$2,$3,$4) ON CONFLICT (family_id, updated_at) DO NOTHING`,
+        [fid, serverAt, plain(serverData), enc(serverData)]);
+    }
+
+    // date_trunc до миллисекунд — чтобы значение, которое клиент получит и
+    // вернёт как baseUpdatedAt, точно совпало с ключом версии в истории.
+    const r = await client.query(
+      `INSERT INTO family_states(family_id, data, data_enc, updated_at, updated_by)
+       VALUES($1, $2, $3, date_trunc('milliseconds', now()), $4)
+       ON CONFLICT (family_id) DO UPDATE
+         SET data=$2, data_enc=$3, updated_at=date_trunc('milliseconds', now()), updated_by=$4
+       RETURNING updated_at`,
+      [fid, plain(toWrite), enc(toWrite), req.user.uid]);
+    const newAt = r.rows[0].updated_at;
+
+    await client.query(
+      `INSERT INTO family_state_versions(family_id, updated_at, data, data_enc)
+       VALUES($1,$2,$3,$4) ON CONFLICT (family_id, updated_at) DO NOTHING`,
+      [fid, newAt, plain(toWrite), enc(toWrite)]);
+
+    await client.query(
+      `INSERT INTO user_activity_events(user_id, family_id, event_type) VALUES($1, $2, 'budget_saved')`,
+      [req.user.uid, fid]);
+
+    await client.query('COMMIT');
+
+    if (!merged) return res.json({ ok: true, updatedAt: newAt });
+
+    // Слияние состоялось и записано. Осталось донести результат до клиента —
+    // и это не формальность: если клиент останется со своей версией, его
+    // следующее сохранение придёт с базой «слитая версия» и данными без чужих
+    // правок, а сервер честно прочитает это как их удаление. То есть
+    // недоставленный результат слияния сам себя отменяет.
+    //
+    // Отсюда два формата ответа. Новый клиент говорит acceptsMerge и получает
+    // 200 с данными. Старый (опубликованный RuStore, versionCode 3) поле data
+    // при 200 игнорирует, а вот на 409 у него есть готовая ветка: принять
+    // серверное состояние и запомнить его версию. Ею и пользуемся — 409 здесь
+    // не выдумка, а правда: запись в присланном виде не применилась, и клиенту
+    // отдаётся актуальное состояние. Расходится только код ответа, данные и
+    // updatedAt в обоих случаях одни и те же.
+    if (acceptsMerge) return res.json({ ok: true, updatedAt: newAt, data: toWrite, merged: true });
+    return res.status(409).json({ error: 'conflict', code: 'MERGED', data: toWrite, updatedAt: newAt });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
   }
-
-  const useEnc = configured();
-  const encBuf = useEnc ? encryptJSON(data) : null;
-  const plainVal = useEnc ? {} : data; // при включённом шифровании в data больше не пишем реальные данные
-
-  const r = await db.query(
-    `INSERT INTO family_states(family_id, data, data_enc, updated_at, updated_by)
-     VALUES($1, $2, $3, now(), $4)
-     ON CONFLICT (family_id) DO UPDATE SET data=$2, data_enc=$3, updated_at=now(), updated_by=$4
-     RETURNING updated_at`,
-    [fid, plainVal, encBuf, req.user.uid]);
-
-  await db.query(
-    `INSERT INTO user_activity_events(user_id, family_id, event_type) VALUES($1, $2, 'budget_saved')`,
-    [req.user.uid, fid]);
-
-  res.json({ ok: true, updatedAt: r.rows[0].updated_at });
 }));
 
 // «Сбросить все данные и начать заново» в Настройках — вместо необратимого PUT
