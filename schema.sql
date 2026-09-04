@@ -59,11 +59,33 @@ ALTER TABLE families ADD COLUMN IF NOT EXISTS yk_payment_method_id text; -- со
 ALTER TABLE families ADD COLUMN IF NOT EXISTS cancel_token text; -- разовая ссылка «отключить автопродление» из письма-напоминания
 ALTER TABLE families ADD COLUMN IF NOT EXISTS renewal_reminder_sent_for timestamptz; -- за какой pro_until уже отправили напоминание — не дублировать
 
--- Новым семьям — 30-дневный триал с полным доступом. Существующие семьи
--- (заведённые до введения тарифов) получают Pro бессрочно задним числом —
--- нечестно вводить платный барьер для тех, кто уже пользовался бесплатно.
+-- Новым семьям — триал с полным доступом (длительность задаёт TRIAL_DAYS, см.
+-- lib/entitlement.js; по умолчанию 30 дней). Существующие семьи (заведённые до
+-- введения тарифов) получают Pro бессрочно задним числом — нечестно вводить
+-- платный барьер для тех, кто уже пользовался бесплатно.
+--
+-- ВНИМАНИЕ, условие по created_at здесь обязательно и держит всю строку:
+-- families.plan НИКОГДА не переводится в 'free' (её пишет только оплата, см.
+-- lib/billingLogic.js), поэтому у всех, кто не платил, она навсегда остаётся
+-- 'trial'. Без ограничения по дате этот UPDATE раздал бы бессрочный Pro всей
+-- базе при первом же рестарте.
 UPDATE families SET plan='pro', pro_until='2099-01-01 00:00:00+00', auto_renew=false
   WHERE plan='trial' AND created_at < '2026-07-26 00:00:00+00';
+
+-- ── ИНВАРИАНТ: trial_ends_at неприкосновенен ────────────────────────────────
+-- server.js выполняет ВЕСЬ этот файл при КАЖДОМ старте процесса, а не один раз.
+-- Поэтому здесь не должно появиться ни одной строки вида
+--     UPDATE families SET trial_ends_at = created_at + interval 'N days'
+-- Такой пересчёт задним числом обрезал бы (или продлевал) срок всем существующим
+-- пользователям при каждом рестарте — в том числе тем, кому уже пообещали
+-- другой срок в момент регистрации. trial_ends_at ставится РОВНО ОДИН РАЗ,
+-- при INSERT семьи в routes/auth.js, и дальше только читается.
+-- Проверяется тестом test/trialMigration.test.js.
+--
+-- families.plan к решению о доступе отношения не имеет: план считается из
+-- trial_ends_at/pro_until (lib/billingLogic.js → lib/entitlement.js). После
+-- этапа 1 колонка не читается нигде, кроме UPDATE выше, и может быть удалена
+-- отдельной миграцией — но не в этом релизе.
 
 CREATE TABLE IF NOT EXISTS payments (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -240,7 +262,9 @@ CREATE TABLE IF NOT EXISTS ai_requests (
   had_context     boolean NOT NULL DEFAULT false,
   decision_type   text NOT NULL DEFAULT 'none',
   -- success | validation_error | not_configured | provider_error | timeout
-  -- | disabled | rate_limited
+  -- | disabled | rate_limited | subscription_required
+  -- (subscription_required — вопрос про личный бюджет на бесплатном тарифе,
+  --  см. denyProReason в routes/ai.js; квоту такой запрос не расходует)
   status          text NOT NULL,
   latency_ms      integer,
   -- Версия связки промпт+база знаний, чтобы понимать, на чём получен отзыв.

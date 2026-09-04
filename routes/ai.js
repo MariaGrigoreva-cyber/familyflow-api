@@ -15,6 +15,8 @@ const { ONBOARDING_SYSTEM_PROMPT, SUPPORT_SYSTEM_PROMPT } = require('../lib/aiPr
 const { SUPPORT_KNOWLEDGE_BASE, buildScreenContext } = require('../lib/aiKnowledgeBase');
 const { decisionSentence } = require('../lib/aiDecision');
 const { checkAiAccess, isOverDailyLimit, logAiRequest, AI_ASSISTANT_VERSION } = require('../lib/aiAccess');
+const { loadEntitlement } = require('../lib/entitlement');
+const { gateEnabled, DENIED_STATUS } = require('../middleware/requireCapability');
 const { aiFeedbackSchema } = require('../lib/schemas');
 
 // Правила поведения (SUPPORT_SYSTEM_PROMPT) + факты о продукте
@@ -53,10 +55,29 @@ async function denyReason(req) {
   return null;
 }
 
-// Фронт узнаёт о доступности AI отсюда, а не по своему email.
+// Фронт узнаёт о доступности AI отсюда, а не по своему email и не по своему
+// представлению о тарифе.
+//
+// Два РАЗНЫХ факта, и их важно не смешивать:
+//   available          — помощник вообще работает для этого пользователя
+//                        (рубильник AI_ENABLED + allowlist беты + ключи LLM);
+//   canAskAboutBudget  — можно задавать вопросы ПРО СВОЙ БЮДЖЕТ, то есть
+//                        отправлять финансовый контекст и получать проверку
+//                        покупки. Это возможность aiAssistant из тарифа Pro.
+// На free-тарифе помощник остаётся доступным для вопросов о работе приложения
+// (aiSupport) — отбирать поддержку у неплатящего человека незачем, платят не
+// за чат, а за то, что помощник знает финансовый план.
 router.get('/status', auth, ah(async (req, res) => {
   const access = await checkAiAccess(req.user.uid);
-  res.json({ available: access.allowed && aiConfigured() });
+  const ent = await loadEntitlement(req.user.uid);
+  res.json({
+    available: access.allowed && aiConfigured(),
+    // Старый клиент это поле игнорирует и продолжает слать financialContext —
+    // его отсечёт сам /support-ask (см. ниже), поэтому доступ не зависит от
+    // того, посмотрел ли клиент в этот ответ.
+    canAskAboutBudget: !!ent && ent.can('aiAssistant'),
+    plan: ent ? ent.plan : null,
+  });
 }));
 
 // Онбординг намеренно НЕ получает SUPPORT_KNOWLEDGE_BASE: он извлекает JSON
@@ -94,6 +115,45 @@ const validateAiSupport = ah(async (req, res, next) => {
   return res.status(400).json({ error: code });
 });
 
+// ── Тарифный шлюз помощника ─────────────────────────────────────────────────
+// Проверяем не «открыт ли экран помощника», а «что именно спрашивают».
+//
+// Вопрос без финансового контекста — это поддержка по продукту (aiSupport,
+// бесплатно). Вопрос, к которому приложен снимок бюджета или готовый вердикт
+// («помещается ли трата в свободный остаток») — это уже персональный
+// финансовый ответ, ради которого и покупают Pro (aiAssistant / spendingCheck).
+//
+// Решение принимает СЕРВЕР и принимает его по содержимому запроса, а не по
+// флагу от клиента: убрать проверку подменой состояния на фронте нельзя, а
+// отправить финансовый контекст в обход — тем более (именно его наличие и
+// включает проверку). Единственный способ «обойти» шлюз — не присылать свои
+// данные вовсе, но тогда и персонального ответа не будет.
+async function denyProReason(req) {
+  const wantsPersonalAnswer = req.body.financialContext != null || req.body.decisionContext != null;
+  if (!wantsPersonalAnswer) return null;
+
+  const ent = await loadEntitlement(req.user.uid);
+  if (!ent) return { status: 404, body: { error: 'no_family' }, log: 'no_family' };
+  if (ent.can('aiAssistant')) return null;
+
+  // Тот же аварийный выключатель, что и у остальных платных роутов.
+  if (!gateEnabled()) {
+    console.warn(`subscription gate OFF: пропускаю POST /ai/support-ask (aiAssistant) с планом ${ent.plan}`);
+    return null;
+  }
+  return {
+    status: DENIED_STATUS,
+    body: {
+      error: 'subscription_required',
+      code: 'SUBSCRIPTION_REQUIRED',
+      capability: 'aiAssistant',
+      plan: ent.plan,
+      trialEndsAt: ent.trialEndsAt,
+    },
+    log: 'subscription_required',
+  };
+}
+
 router.post('/support-ask', auth, validateAiSupport, ah(async (req, res) => {
   const denied = await denyReason(req);
   if (denied) {
@@ -101,6 +161,16 @@ router.post('/support-ask', auth, validateAiSupport, ah(async (req, res) => {
     await logAiRequest({ uid: req.user.uid, screen: req.body.screen, status: denied.log });
     return res.status(denied.status).json({ error: denied.code });
   }
+
+  // Тарифный отказ проверяем ПОСЛЕ технического: если помощник вообще выключен,
+  // предлагать за него заплатить — обман. Квоту он не расходует (см.
+  // QUOTA_STATUSES): до провайдера запрос не дошёл.
+  const proDenied = await denyProReason(req);
+  if (proDenied) {
+    await logAiRequest({ uid: req.user.uid, screen: req.body.screen, status: proDenied.log });
+    return res.status(proDenied.status).json(proDenied.body);
+  }
+
   const startedAt = Date.now();
 
   // Контекст экрана собирается из нашего закрытого справочника по коду —

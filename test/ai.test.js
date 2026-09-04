@@ -897,11 +897,14 @@ describe('Доступ к бете решает сервер', () => {
     process.env.AI_OWNER_EMAIL = 'owner@example.com';
     process.env.AI_BETA_EMAILS = 'beta@example.com';
     const denied = await request.get('/ai/status').set('Authorization', `Bearer ${u.token}`);
-    expect(denied.body).toEqual({ available: false });
+    // toMatchObject, а не toEqual: в ответе есть ещё canAskAboutBudget/plan
+    // (тарифная часть доступа, см. lib/capabilities.js). Здесь проверяется
+    // именно допуск к бете, и он не должен зависеть от тарифа.
+    expect(denied.body).toMatchObject({ available: false });
 
     process.env.AI_BETA_EMAILS = u.email;
     const allowed = await request.get('/ai/status').set('Authorization', `Bearer ${u.token}`);
-    expect(allowed.body).toEqual({ available: true });
+    expect(allowed.body).toMatchObject({ available: true });
   });
 
   test('удаление из allowlist закрывает доступ сразу, без перезапуска', async () => {
@@ -942,7 +945,7 @@ describe('AI_ENABLED — глобальный рубильник', () => {
     expect(res.status).toBe(503);
     expect(global.fetch).not.toHaveBeenCalled();
     expect((await request.get('/ai/status').set('Authorization', `Bearer ${u.token}`)).body)
-      .toEqual({ available: false });
+      .toMatchObject({ available: false });
   });
 
   test('false выключает и онбординг-черновик', async () => {
