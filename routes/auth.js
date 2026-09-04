@@ -67,7 +67,14 @@ router.post('/register', validate(registerSchema), ah(async (req, res) => {
       // Подставляется параметром, а не литералом в тексте запроса: раньше здесь
       // и в Яндекс-потоке ниже стояли два независимых `interval '30 days'`, и их
       // легко было развести по значению.
-      `INSERT INTO families(name, trial_ends_at) VALUES($1, now() + ($2 || ' days')::interval) RETURNING id`,
+      //
+      // $2 приводится к интервалу КАК ЕСТЬ. Единицу измерения дописывать сюда
+      // нельзя: trialIntervalParam() уже возвращает готовое «30 days». Раньше
+      // здесь стояло ($2 || ' days'), из-за чего в Postgres уходило
+      // «30 days days» — мой локальный PG 16.14 такую строку принимал, а на
+      // проде она валилась с 22007 DateTimeParseError, и регистрация не
+      // работала вовсе. Проверяется тестом test/trialInterval.test.js.
+      `INSERT INTO families(name, trial_ends_at) VALUES($1, now() + $2::interval) RETURNING id`,
       [familyName || 'Моя семья', trialIntervalParam()]
     );
     await client.query(
@@ -374,7 +381,8 @@ router.get('/yandex/callback', ah(async (req, res) => {
       ({ id: userId, token_version: tokenVersion } = u.rows[0]);
       const f = await client.query(
         // Тот же срок, что и при обычной регистрации — см. lib/entitlement.js.
-        `INSERT INTO families(name, trial_ends_at) VALUES($1, now() + ($2 || ' days')::interval) RETURNING id`,
+        // Единицу к $2 не дописываем, см. комментарий в /register выше.
+        `INSERT INTO families(name, trial_ends_at) VALUES($1, now() + $2::interval) RETURNING id`,
         ['Моя семья', trialIntervalParam()]
       );
       await client.query(

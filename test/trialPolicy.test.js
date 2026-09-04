@@ -257,11 +257,18 @@ describe('существующие trial_ends_at не пересчитывают
 // ════════════════════════════════════════════════════════════════════════════
 describe('срок задаётся в одном месте', () => {
   test('оба INSERT в routes/auth.js берут срок из общего хелпера', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'auth.js'), 'utf8');
+    // Комментарии вырезаем — они упоминают и хелпер, и обе формы SQL.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'auth.js'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
     const inserts = src.match(/INSERT INTO families\([^)]*\)[^`]*/g) || [];
     expect(inserts.length).toBe(2);
     for (const stmt of inserts) {
-      expect(stmt).toContain("($2 || ' days')::interval");
+      // Единица измерения уже внутри trialIntervalParam() («30 days»), поэтому
+      // в SQL параметр приводится КАК ЕСТЬ. Раньше здесь ожидалось
+      // ($2 || ' days')::interval — эта форма давала «30 days days» и роняла
+      // регистрацию на проде (22007). См. test/trialInterval.test.js.
+      expect(stmt).toContain('$2::interval');
+      expect(stmt).not.toMatch(/\|\|\s*'\s*days/);
       expect(stmt).not.toMatch(/interval\s+'\d+\s+days'/);
     }
     expect((src.match(/trialIntervalParam\(\)/g) || []).length).toBe(2);

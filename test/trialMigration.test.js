@@ -158,11 +158,17 @@ describe('оба потока регистрации дают одинаковы
   test('оба INSERT берут срок из общего хелпера, а не из своего литерала', () => {
     // Статическая страховка: даже если интеграционный тест выше когда-нибудь
     // отключат, здесь сразу видно возврат к зашитому `interval '30 days'`.
-    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'auth.js'), 'utf8');
+    // Комментарии вырезаем: они упоминают и хелпер, и прежнюю форму SQL как
+    // пример того, чего делать нельзя — иначе тест считал бы их за код.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'auth.js'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
     const inserts = src.match(/INSERT INTO families\([^)]*\)[^`]*/g) || [];
     expect(inserts.length).toBe(2);
     for (const stmt of inserts) {
-      expect(stmt).toContain("($2 || ' days')::interval");
+      // Параметр приводится как есть: единица уже внутри trialIntervalParam().
+      // Прежняя форма ($2 || ' days') давала «30 days days» и роняла
+      // регистрацию на проде — см. test/trialInterval.test.js.
+      expect(stmt).toContain('$2::interval');
       expect(stmt).not.toMatch(/interval\s+'\d+\s+days'/);
     }
     expect((src.match(/trialIntervalParam\(\)/g) || []).length).toBe(2);
