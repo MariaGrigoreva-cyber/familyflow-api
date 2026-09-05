@@ -326,12 +326,21 @@ describe('PUT/GET /state — шифрование (DATA_ENC_KEY задан)', ()
     const u = await registerUser();
     await request.put('/state').set('Authorization', `Bearer ${u.token}`).send({ data: { appState: { x: 1 } } });
 
-    process.env.DATA_ENC_KEY = crypto.randomBytes(32).toString('hex'); // "потеряли" исходный ключ
-    const res = await request.get('/state').set('Authorization', `Bearer ${u.token}`);
-    expect(res.status).toBe(500);
-    expect(res.body.error).toBe('decrypt_failed');
-
-    process.env.DATA_ENC_KEY = testKey; // возвращаем для остальных тестов этого блока
+    // try/finally здесь обязателен. jest запускает файлы с maxWorkers: 1, то
+    // есть ВСЕ они делят один процесс и один process.env. Если проверка ниже
+    // упадёт без восстановления ключа, случайный ключ утечёт не только в
+    // остальные тесты этого блока, но и в следующие файлы: там начнёт падать
+    // расшифровка в местах, никак не связанных с настоящей причиной. Один
+    // сбой превращался бы в россыпь разных, каждый раз других падений — и
+    // именно так выглядел перемежающийся флейк, который ловился на CI.
+    try {
+      process.env.DATA_ENC_KEY = crypto.randomBytes(32).toString('hex'); // "потеряли" исходный ключ
+      const res = await request.get('/state').set('Authorization', `Bearer ${u.token}`);
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe('decrypt_failed');
+    } finally {
+      process.env.DATA_ENC_KEY = testKey; // возвращаем для остальных тестов этого блока
+    }
   });
 });
 
