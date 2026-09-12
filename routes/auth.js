@@ -11,6 +11,7 @@ const { sendMail, mailConfigured, renderTemplate, unsubscribeUrl, verifyUnsubscr
 const validate = require('../middleware/validate');
 const { registerSchema, loginSchema, changePasswordSchema, resetRequestSchema, resetConfirmSchema } = require('../lib/schemas');
 const { trialIntervalParam } = require('../lib/entitlement');
+const { appPublicUrl, appPublicUrlConfigured } = require('../lib/appUrl');
 
 // tv (token_version) — см. middleware/auth.js: смена/сброс пароля увеличивает
 // версию в БД и тем самым отзывает все ранее выданные токены.
@@ -279,8 +280,10 @@ router.get('/me', authMw, ah(async (req, res) => {
 // Переход по ссылке из письма — обычная браузерная навигация, не JSON-запрос.
 router.get('/verify-email', ah(async (req, res) => {
   const token = String(req.query.token || '');
-  const frontendUrl = (process.env.CORS_ORIGIN || '').split(',')[0].trim();
-  const redirectOk = frontendUrl && frontendUrl !== '*';
+  const frontendUrl = appPublicUrl();
+  // На ненастроенном стенде адрес неизвестен — тогда не уводим никуда, а
+  // показываем страницу с подтверждением (см. ниже).
+  const redirectOk = appPublicUrlConfigured();
   if (!token) return res.status(400).send('Ссылка недействительна.');
   const u = await db.query(
     `UPDATE users SET email_verified_at=now(), verify_token=NULL, verify_expires=NULL
@@ -311,7 +314,7 @@ router.get('/unsubscribe', ah(async (req, res) => {
 // ссылается на oauth.yandex.ru/authorize с redirect_uri сюда. Секрет нужен
 // только здесь — при обмене code на access_token на сервере.
 router.get('/yandex/callback', ah(async (req, res) => {
-  const frontendUrl = (process.env.CORS_ORIGIN || '').split(',')[0].trim();
+  const frontendUrl = appPublicUrl();
   const fail = reason => res.redirect(302, `${frontendUrl}/#yandex_error=${encodeURIComponent(reason)}`);
 
   const code = String(req.query.code || '');

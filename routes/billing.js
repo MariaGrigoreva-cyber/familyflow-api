@@ -7,6 +7,7 @@ const ah = require('../middleware/asyncHandler');
 const yk = require('../lib/yookassa');
 const { applySucceededPayment } = require('../lib/billingLogic');
 const { computeEntitlement } = require('../lib/entitlement');
+const { appPublicUrl } = require('../lib/appUrl');
 const validate = require('../middleware/validate');
 const { billingCheckoutSchema } = require('../lib/schemas');
 const { prices, priceRub } = require('../lib/pricing');
@@ -76,7 +77,7 @@ router.post('/checkout', authMw, validate(billingCheckoutSchema), ah(async (req,
   if (!m.rows.length) return res.status(403).json({ error: 'owner_only' });
   const familyId = m.rows[0].family_id;
   const amount = priceRub(period);
-  const frontendUrl = (process.env.CORS_ORIGIN || '').split(',')[0].trim() || 'https://app.myfamilyflow.ru';
+  const frontendUrl = appPublicUrl();
 
   // Защита от двойного клика «Оплатить»: если недавно уже создан платёж этой же
   // семьи и того же периода, который всё ещё ждёт подтверждения — отдаём его

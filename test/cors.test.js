@@ -212,42 +212,41 @@ describe('пример окружения не расходится с реал�
   });
 });
 
-describe('порядок значений в CORS_ORIGIN важен', () => {
-  // CORS_ORIGIN служит двум целям сразу: это и список разрешённых origin, и —
-  // по первому элементу — публичный адрес приложения. Второе неочевидно, а
-  // цена ошибки высокая, поэтому и вынесено в тест.
-  const CONSUMERS = [
-    ['routes/auth.js', 'verify-email и yandex/callback: редирект после подтверждения почты и после входа'],
-    ['routes/billing.js', 'адрес возврата из ЮKassa после оплаты'],
-    ['lib/onboardingScheduler.js', 'ссылки в онбординг-письмах'],
-    ['lib/trialScheduler.js', 'ссылка в письме об окончании пробного периода'],
-  ];
+describe('порядок значений больше ничего не решает', () => {
+  // Так было раньше: CORS_ORIGIN служил и списком origin, и — первым элементом —
+  // публичным адресом приложения. Дописать новый origin в начало значило увести
+  // туда платёж, письма и токен входа через Яндекс ID. Адрес вынесен в
+  // APP_PUBLIC_URL (lib/appUrl.js), и здесь закреплено, что связи больше нет.
+  const appUrlPath = path.join(__dirname, '..', 'lib', 'appUrl.js');
 
-  test('первым идёт адрес веб-приложения, а не origin мобильного WebView', () => {
-    const first = PRODUCTION_CORS_ORIGIN.split(',')[0].trim();
-    expect(first).toBe(WEB_ORIGIN);
-    // Если первым окажется https://localhost, то письма и возврат из оплаты
-    // поведут человека на несуществующий адрес, а вход через Яндекс ID отдаст
-    // токен в никуда. Дописывать новые origin нужно В КОНЕЦ списка.
-    expect(first).not.toBe(ANDROID_ORIGIN);
-  });
-
-  test('места, которые зависят от первого элемента, перечислены и действительно так делают', () => {
-    const fs = require('fs');
-    const path = require('path');
-    for (const [file] of CONSUMERS) {
-      const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
-      expect(src).toMatch(/CORS_ORIGIN[^\n]*split\(','\)\[0\]/);
+  test('перестановка origin не меняет адрес приложения', () => {
+    const saved = [process.env.APP_PUBLIC_URL, process.env.CORS_ORIGIN];
+    try {
+      process.env.APP_PUBLIC_URL = WEB_ORIGIN;
+      const { appPublicUrl } = require('../lib/appUrl');
+      process.env.CORS_ORIGIN = [ANDROID_ORIGIN, WEB_ORIGIN].join(',');
+      expect(appPublicUrl()).toBe(WEB_ORIGIN);
+      process.env.CORS_ORIGIN = [WEB_ORIGIN, ANDROID_ORIGIN].join(',');
+      expect(appPublicUrl()).toBe(WEB_ORIGIN);
+    } finally {
+      for (const [i, k] of ['APP_PUBLIC_URL', 'CORS_ORIGIN'].entries()) {
+        if (saved[i] === undefined) delete process.env[k];
+        else process.env[k] = saved[i];
+      }
     }
   });
 
-  test('появился новый потребитель первого элемента — список выше нужно обновить', () => {
-    const { execSync } = require('child_process');
-    const root = path.join(__dirname, '..');
-    const out = execSync(
-      "grep -rl \"CORS_ORIGIN[^\\n]*split(',')\\[0\\]\" lib routes middleware || true",
-      { cwd: root, encoding: 'utf8' });
-    const found = out.split('\n').map(s => s.trim()).filter(Boolean).sort();
-    expect(found).toEqual(CONSUMERS.map(([f]) => f).sort());
+  test('первый элемент читает только модуль совместимости', () => {
+    // Он нужен, пока APP_PUBLIC_URL выставлена не на всех стендах: без него
+    // выкатка молча сломала бы ссылки в письмах и возврат из оплаты.
+    expect(fs.readFileSync(appUrlPath, 'utf8')).toMatch(/split\(','\)\[0\]/);
+  });
+
+  test('рекомендованный порядок в примере окружения сохранён', () => {
+    // Для самого CORS порядок безразличен, но адрес приложения первым — это
+    // ещё и подстраховка для стендов, где APP_PUBLIC_URL не выставили.
+    const example = fs.readFileSync(path.join(__dirname, '..', '.env.example'), 'utf8');
+    const line = example.split('\n').find(l => l.startsWith('CORS_ORIGIN='));
+    expect(line.slice('CORS_ORIGIN='.length).split(',')[0].trim()).toBe(WEB_ORIGIN);
   });
 });
